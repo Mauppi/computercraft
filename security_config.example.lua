@@ -62,6 +62,7 @@ return {
       operateDoors = 3,
       lockdown = 4,
       manageEmployees = 5,
+      quitKiosk = 5,
     },
     initialAccounts = {
       admin = { pin = "2468", displayName = "Facility Admin", role = "admin", clearance = 5 },
@@ -85,6 +86,7 @@ return {
       EMPLOYEE_ADD = 5,
       EMPLOYEE_ROLE = 5,
       EMPLOYEE_CLEARANCE = 5,
+      KIOSK_QUIT = 5,
       LOCKDOWN = 3,
       LOCKDOWN_CLEAR = 3,
       SENSOR_FAULT = 2,
@@ -98,6 +100,7 @@ return {
     locked = true,
     syncSeconds = 2,
     alarmSoundSeconds = 1.5,
+    quitClearance = 5,
   },
 
   monitors = {
@@ -173,6 +176,8 @@ return {
       volume = 1.2,
       sampleRate = 48000,
       duration = 0.35,
+      -- Omit patterns to use the built-in low/dissonant alarm profiles.
+      -- Override patterns.security/power_fault/facility_fault/emergency here if desired.
     },
 
     -- Sirens, lamps, Create contraptions, or redstone integrators can be driven here.

@@ -42,6 +42,7 @@ Employees can sign in, edit personal notes, read/post to the facility feed, send
 `startup_auto_update.lua` fetches `security_system.lua` from `https://raw.githubusercontent.com/Mauppi/computercraft/master/security_system.lua`. Its default after-update behavior is `run` for server mode and `reboot` for kiosk mode. HTTP must be enabled in the CC:Tweaked server config.
 
 Locked kiosks do not expose a Quit option and disable normal Ctrl+T termination in kiosk mode. Set `kiosk.locked = false` only for development computers.
+Logged-in employees can quit kiosk mode only if the server approves the `quitKiosk` permission. `kiosk.quitClearance` is only a local display fallback; server permissions remain authoritative.
 
 Kiosks stay synced to the server alarm/lockdown state through rednet broadcasts and a periodic heartbeat. If a kiosk has a speaker attached, it mirrors active alarm sounds locally.
 
@@ -55,15 +56,15 @@ Employee clearance controls kiosk security actions:
 - C2 can trigger regular security alarms.
 - C3 can reset alarms and operate doors.
 - C4 can start or clear lockdown.
-- C5 can manage employees from the server console.
+- C5 can manage employees from the server console and authorize kiosk exit.
 
-Change thresholds in `employees.permissions`.
+Change thresholds in `employees.permissions`, including `quitKiosk`.
 
 Facility logs are available from the kiosk menu. The server tags new log lines with a clearance marker such as `C2` or `C5`, and employees only receive log lines at or below their clearance. Configure this with `logs.clearances` and the `viewLogs` permission.
 
 ## Alarm Audio And Emergency Buttons
 
-Speakers use generated PCM/DSP alarm pulses through `speaker.playAudio` when available, with Minecraft sound fallback. Configure or disable this under `alarm.dsp`.
+Speakers use generated PCM/DSP alarm pulses through `speaker.playAudio` when available, with Minecraft sound fallback. The default DSP profiles use low dissonant tones, sub harmonics, tremolo, and light grit for a more menacing alarm sound. Configure or disable this under `alarm.dsp`.
 
 Emergency button example:
 

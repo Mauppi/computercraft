@@ -8,6 +8,7 @@ local CONFIG_FILE = "security_config.lua"
 local LOG_FILE = "security_audit.log"
 local ACCOUNTS_FILE = "security_accounts.lua"
 local SOCIAL_FILE = "security_social.lua"
+local KIOSK_EXIT_FILE = ".security_kiosk_exit"
 local PROTOCOL = "cc_security_v1"
 local args = { ... }
 
@@ -74,6 +75,7 @@ local defaultConfig = {
       operateDoors = 3,
       lockdown = 4,
       manageEmployees = 5,
+      quitKiosk = 5,
     },
     initialAccounts = {
       -- admin = { pin = "2468", displayName = "Facility Admin", role = "admin" },
@@ -95,6 +97,7 @@ local defaultConfig = {
       EMPLOYEE_ADD = 5,
       EMPLOYEE_ROLE = 5,
       EMPLOYEE_CLEARANCE = 5,
+      KIOSK_QUIT = 5,
       LOCKDOWN = 3,
       LOCKDOWN_CLEAR = 3,
       SENSOR_FAULT = 2,
@@ -108,6 +111,7 @@ local defaultConfig = {
     locked = true,
     syncSeconds = 2,
     alarmSoundSeconds = 1.5,
+    quitClearance = 5,
   },
 
   monitors = {
@@ -173,21 +177,22 @@ local defaultConfig = {
       duration = 0.35,
       patterns = {
         security = {
-          { freq = 880, sweep = 220, duration = 0.18, gain = 0.85 },
-          { freq = 660, sweep = -120, duration = 0.14, gain = 0.7 },
+          { freq = 185, sweep = -35, duration = 0.34, gain = 0.95, sub = 0.55, harmonic = 0.42, tremolo = 9, noise = 0.05 },
+          { freq = 270, sweep = 120, duration = 0.22, gain = 0.9, sub = 0.35, harmonic = 0.5, tremolo = 13, noise = 0.04 },
+          { freq = 140, sweep = 0, duration = 0.18, gain = 0.8, sub = 0.65, harmonic = 0.32, tremolo = 7, noise = 0.06 },
         },
         power_fault = {
-          { freq = 220, sweep = 180, duration = 0.22, gain = 0.9 },
-          { freq = 330, sweep = 80, duration = 0.18, gain = 0.75 },
+          { freq = 92, sweep = 18, duration = 0.36, gain = 1.0, sub = 0.85, harmonic = 0.28, tremolo = 5, noise = 0.08 },
+          { freq = 155, sweep = -55, duration = 0.24, gain = 0.95, sub = 0.75, harmonic = 0.36, tremolo = 8, noise = 0.08 },
         },
         facility_fault = {
-          { freq = 440, sweep = -80, duration = 0.16, gain = 0.65 },
-          { freq = 520, sweep = 140, duration = 0.16, gain = 0.65 },
+          { freq = 260, sweep = -90, duration = 0.22, gain = 0.85, sub = 0.45, harmonic = 0.48, tremolo = 10, noise = 0.05 },
+          { freq = 392, sweep = -150, duration = 0.2, gain = 0.75, sub = 0.3, harmonic = 0.56, tremolo = 12, noise = 0.04 },
         },
         emergency = {
-          { freq = 960, sweep = 420, duration = 0.2, gain = 0.95 },
-          { freq = 1280, sweep = -360, duration = 0.18, gain = 0.9 },
-          { freq = 720, sweep = 540, duration = 0.16, gain = 0.9 },
+          { freq = 740, sweep = 520, duration = 0.16, gain = 1.0, sub = 0.25, harmonic = 0.6, tremolo = 18, noise = 0.04 },
+          { freq = 185, sweep = -60, duration = 0.28, gain = 1.0, sub = 0.9, harmonic = 0.36, tremolo = 11, noise = 0.08 },
+          { freq = 980, sweep = -420, duration = 0.14, gain = 0.95, sub = 0.2, harmonic = 0.64, tremolo = 20, noise = 0.04 },
         },
       },
     },
@@ -1056,6 +1061,9 @@ local function alarmStatePayload()
       primaryColor = brand.primaryColor,
       accentColor = brand.accentColor,
       textColor = brand.textColor,
+      permissions = {
+        quitKiosk = config.employees and config.employees.permissions and config.employees.permissions.quitKiosk or 5,
+      },
     },
     alarm = {
       active = state.alarm.active,
@@ -1115,6 +1123,10 @@ local function buildDspAlarmBuffer(profile)
     local startFreq = tonumber(tone.freq) or 660
     local sweep = tonumber(tone.sweep) or 0
     local gain = tonumber(tone.gain) or 0.75
+    local subGain = tonumber(tone.sub) or 0.18
+    local harmonicGain = tonumber(tone.harmonic) or 0.24
+    local tremoloRate = tonumber(tone.tremolo) or 0
+    local noiseGain = tonumber(tone.noise) or 0
 
     for index = 1, samples do
       local progress = index / samples
@@ -1128,9 +1140,13 @@ local function buildDspAlarmBuffer(profile)
         envelope = (1 - progress) / 0.12
       end
 
-      local warble = math.sin(progress * math.pi * 16) * 0.22
-      local harmonic = math.sin(phase * 2.01) * 0.24
-      local sample = (math.sin(phase) + harmonic + warble) * 92 * gain * envelope
+      local tremolo = tremoloRate > 0 and (0.72 + 0.28 * math.sin(progress * math.pi * 2 * tremoloRate)) or 1
+      local warble = math.sin(progress * math.pi * 16) * 0.18
+      local harmonic = math.sin(phase * 2.013) * harmonicGain
+      local sub = math.sin(phase * 0.5) * subGain
+      local gritSeed = math.sin((index + startFreq) * 12.9898) * 43758.5453
+      local grit = (gritSeed - math.floor(gritSeed) - 0.5) * noiseGain
+      local sample = (math.sin(phase) + harmonic + sub + warble + grit) * 88 * gain * envelope * tremolo
       buffer[#buffer + 1] = clampSample(sample)
     end
   end
@@ -2215,6 +2231,9 @@ local function publicBrandPayload()
     accentColor = brand.accentColor,
     textColor = brand.textColor,
     allowSelfRegistration = config.employees and config.employees.allowSelfRegistration or false,
+    permissions = {
+      quitKiosk = config.employees and config.employees.permissions and config.employees.permissions.quitKiosk or 5,
+    },
   }
 end
 
@@ -2658,6 +2677,8 @@ local function handleRednet(sender, message, protocol)
       permission = "lockdown"
     elseif action == "unlock_door" or action == "lock_door" then
       permission = "operateDoors"
+    elseif action == "quit_kiosk" then
+      permission = "quitKiosk"
     end
 
     local record, err = requireEmployeePermission(message.token, permission)
@@ -2705,6 +2726,9 @@ local function handleRednet(sender, message, protocol)
       else
         reply.error = "unknown door"
       end
+    elseif action == "quit_kiosk" then
+      audit("KIOSK_QUIT", { actor = record.username, sender = sender })
+      reply.ok = true
     else
       reply.error = "unknown security action"
     end
@@ -4165,6 +4189,25 @@ local function kioskLogs(serverId, brand, token, user)
   return true
 end
 
+local function requestKioskQuit(serverId, token)
+  local reply = kioskRequest(serverId, "kiosk_security_action", {
+    token = token,
+    action = "quit_kiosk",
+  })
+
+  if not reply.ok then
+    print("Denied/failed: " .. tostring(reply.error))
+    pause()
+    return false
+  end
+
+  local handle = fs.open(KIOSK_EXIT_FILE, "w")
+  handle.writeLine("authorized " .. timestamp())
+  handle.close()
+  state.kiosk.running = false
+  return true
+end
+
 local function kioskSecurityActions(serverId, brand, token, user)
   while true do
     drawKioskHeader(brand, user)
@@ -4218,6 +4261,9 @@ end
 local function kioskMenu(serverId, brand, token, user)
   while true do
     drawKioskHeader(brand, user)
+    brand = state.kiosk.branding or brand or {}
+    local quitClearance = brand.permissions and tonumber(brand.permissions.quitKiosk) or tonumber(config.kiosk and config.kiosk.quitClearance) or 5
+    local canQuitKiosk = quitClearance == nil or (tonumber(user.clearance) or 0) >= quitClearance
     print("1. Personal notes")
     print("2. Facility feed")
     print("3. Messages")
@@ -4225,6 +4271,9 @@ local function kioskMenu(serverId, brand, token, user)
     print("5. Facility status")
     print("6. Security actions")
     print("7. Facility logs")
+    if canQuitKiosk then
+      print("Q. Quit kiosk")
+    end
     print("L. Log out")
     local choice = string.lower(kioskRead("> "))
 
@@ -4256,6 +4305,10 @@ local function kioskMenu(serverId, brand, token, user)
       if not kioskLogs(serverId, brand, token, user) then
         return "logout"
       end
+    elseif choice == "q" and canQuitKiosk then
+      if requestKioskQuit(serverId, token) then
+        return "quit"
+      end
     elseif choice == "l" then
       kioskRequest(serverId, "kiosk_logout", { token = token }, 2)
       return "logout"
@@ -4277,7 +4330,10 @@ local function kioskUiLoop()
       if action == "quit" and config.kiosk and config.kiosk.locked == false then
         return
       elseif action ~= "retry" and token and user then
-        kioskMenu(serverId, brand, token, user)
+        local menuResult = kioskMenu(serverId, brand, token, user)
+        if menuResult == "quit" then
+          return
+        end
       end
     end
   end
@@ -4286,6 +4342,10 @@ end
 local function kioskMain()
   config = loadConfig()
   config.mode = "kiosk"
+  if fs.exists(KIOSK_EXIT_FILE) then
+    fs.delete(KIOSK_EXIT_FILE)
+  end
+  local originalPullEvent = os.pullEvent
   if not (config.kiosk and config.kiosk.locked == false) then
     os.pullEvent = os.pullEventRaw
   end
@@ -4298,6 +4358,7 @@ local function kioskMain()
   end)
 
   state.kiosk.running = false
+  os.pullEvent = originalPullEvent
   if not ok then
     error(err)
   end

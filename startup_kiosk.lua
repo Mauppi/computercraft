@@ -4,6 +4,7 @@
 local CONFIG_FILE = "security_config.lua"
 local KIOSK_CONFIG_EXAMPLE = "security_kiosk_config.example.lua"
 local SECURITY_PROGRAM = "security_system.lua"
+local KIOSK_EXIT_FILE = ".security_kiosk_exit"
 local RESTART_SECONDS = 3
 
 local function clear()
@@ -25,7 +26,7 @@ local function copyKioskConfigIfMissing()
   handle.writeLine("return {")
   handle.writeLine("  mode = \"kiosk\",")
   handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3 },")
-  handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5 },")
+  handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5 },")
   handle.writeLine("  branding = {")
   handle.writeLine("    facilityName = \"Facility\",")
   handle.writeLine("    shortName = \"SEC\",")
@@ -62,6 +63,12 @@ local function runKiosk()
 
     clear()
     print("Employee Kiosk stopped.")
+    if fs.exists(KIOSK_EXIT_FILE) then
+      fs.delete(KIOSK_EXIT_FILE)
+      print("Authorized kiosk exit.")
+      return
+    end
+
     if not ok then
       print("Error: " .. tostring(result))
     elseif result == false then

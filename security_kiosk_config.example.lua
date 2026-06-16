@@ -19,6 +19,7 @@ return {
     locked = true,
     syncSeconds = 2,
     alarmSoundSeconds = 1.5,
+    quitClearance = 5,
   },
 
   branding = {
