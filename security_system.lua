@@ -2532,6 +2532,327 @@ function statusSnapshot()
   }
 end
 
+function handleStatusMessage(reply)
+  reply.ok = true
+  reply.status = statusSnapshot()
+end
+
+function handleKioskHelloMessage(reply)
+  reply.ok = true
+  reply.serverId = os.getComputerID and os.getComputerID() or nil
+  reply.branding = publicBrandPayload()
+  reply.status = statusSnapshot()
+end
+
+function handleKioskLoginMessage(sender, message, reply)
+  local ok, record = verifyEmployee(message.username, message.pin)
+  if ok then
+    reply.ok = true
+    reply.token = createSession(record.username)
+    reply.user = publicEmployee(record)
+    reply.branding = publicBrandPayload()
+    audit("EMPLOYEE_LOGIN", { user = record.username, sender = sender })
+  else
+    reply.error = "invalid login"
+    audit("EMPLOYEE_LOGIN_DENIED", { user = message.username, sender = sender })
+  end
+end
+
+function handleKioskRegisterMessage(message, reply)
+  local ok, err = registerEmployee(message.username, message.pin, message.displayName)
+  reply.ok = ok
+  reply.error = err
+  reply.branding = publicBrandPayload()
+end
+
+function handleKioskLogoutMessage(message, reply)
+  if message.token then
+    state.sessions[tostring(message.token)] = nil
+  end
+  reply.ok = true
+end
+
+function handleKioskNotesMessage(message, reply)
+  local record = sessionRecord(message.token)
+  if record then
+    reply.ok = true
+    reply.notes = notesFor(record.username)
+  else
+    reply.error = "session expired"
+  end
+end
+
+function handleKioskSaveNoteMessage(message, reply)
+  local record = sessionRecord(message.token)
+  if record then
+    local ok, id, err = addEmployeeNote(record, message.title or "Untitled", message.body or "", message.id)
+    reply.ok = ok
+    reply.id = id
+    reply.error = err
+  else
+    reply.error = "session expired"
+  end
+end
+
+function handleKioskDeleteNoteMessage(message, reply)
+  local record = sessionRecord(message.token)
+  if record then
+    reply.ok = deleteEmployeeNote(record, tostring(message.id or ""))
+    if not reply.ok then
+      reply.error = "note not found"
+    end
+  else
+    reply.error = "session expired"
+  end
+end
+
+function handleKioskFeedMessage(message, reply)
+  local record = sessionRecord(message.token)
+  if record then
+    reply.ok = true
+    reply.feed = state.social.feed
+  else
+    reply.error = "session expired"
+  end
+end
+
+function handleKioskPostMessage(message, reply)
+  local record, err = requireEmployeePermission(message.token, "postFeed")
+  if record then
+    reply.ok = true
+    reply.post = addFeedPost(record, message.text or "")
+  else
+    reply.error = err
+  end
+end
+
+function handleKioskInboxMessage(message, reply)
+  local record = sessionRecord(message.token)
+  if record then
+    reply.ok = true
+    reply.messages = socialMailbox(record.username)
+  else
+    reply.error = "session expired"
+  end
+end
+
+function handleKioskSendMessage(message, reply)
+  local record, err = requireEmployeePermission(message.token, "sendMessage")
+  if record then
+    local ok, sendErr = sendDirectMessage(record, message.to, message.text or "")
+    reply.ok = ok
+    reply.error = sendErr
+  else
+    reply.error = err
+  end
+end
+
+function handleKioskPeopleMessage(message, reply)
+  local record = sessionRecord(message.token)
+  if record then
+    reply.ok = true
+    reply.people = employeeList()
+  else
+    reply.error = "session expired"
+  end
+end
+
+function handleKioskStatusMessage(message, reply)
+  local record, err = requireEmployeePermission(message.token, "viewStatus")
+  if record then
+    reply.ok = true
+    reply.status = statusSnapshot()
+  else
+    reply.error = err
+  end
+end
+
+function handleKioskLogsMessage(message, reply)
+  local record, err = requireEmployeePermission(message.token, "viewLogs")
+  if record then
+    reply.ok = true
+    reply.logs = readFacilityLogsFor(record, message.limit)
+    reply.clearance = employeeClearance(record)
+  else
+    reply.error = err
+  end
+end
+
+function kioskSecurityPermission(action)
+  if action == "emergency" then
+    return "triggerEmergency"
+  elseif action == "reset_alarm" then
+    return "resetAlarm"
+  elseif action == "lockdown" or action == "unlockdown" then
+    return "lockdown"
+  elseif action == "unlock_door" or action == "lock_door" then
+    return "operateDoors"
+  elseif action == "quit_kiosk" then
+    return "quitKiosk"
+  end
+  return "triggerAlarm"
+end
+
+function handleKioskDoorAction(action, record, message, reply)
+  local doorId = tostring(message.door or "")
+  if not config.doors[doorId] then
+    reply.error = "unknown door"
+  elseif action == "unlock_door" then
+    local ok, doorErr = unlockDoor(doorId, record.username, message.seconds, "employee")
+    reply.ok = ok
+    reply.error = doorErr
+  else
+    local ok, doorErr = lockDoor(doorId, "employee")
+    reply.ok = ok
+    reply.error = doorErr
+  end
+end
+
+function handleKioskSecurityActionMessage(sender, message, reply)
+  local action = tostring(message.action or "")
+  local record, err = requireEmployeePermission(message.token, kioskSecurityPermission(action))
+  if not record then
+    reply.error = err
+  elseif action == "emergency" then
+    raiseAlarm(tostring(message.reason or "employee emergency"), nil, record.username, "emergency")
+    reply.ok = true
+  elseif action == "alarm" then
+    raiseAlarm(tostring(message.reason or "employee alarm"), nil, record.username, message.profile or "security")
+    reply.ok = true
+  elseif action == "reset_alarm" then
+    resetAlarm(record.username)
+    reply.ok = true
+  elseif action == "lockdown" then
+    state.lockdown = true
+    for _, doorId in ipairs(tableKeys(config.doors)) do
+      lockDoor(doorId, "employee_lockdown", true)
+    end
+    audit("LOCKDOWN", { actor = record.username, source = "kiosk" })
+    markDirty()
+    broadcastAlarmState()
+    reply.ok = true
+  elseif action == "unlockdown" then
+    state.lockdown = false
+    audit("LOCKDOWN_CLEAR", { actor = record.username, source = "kiosk" })
+    markDirty()
+    broadcastAlarmState()
+    reply.ok = true
+  elseif action == "unlock_door" or action == "lock_door" then
+    handleKioskDoorAction(action, record, message, reply)
+  elseif action == "quit_kiosk" then
+    audit("KIOSK_QUIT", { actor = record.username, sender = sender })
+    reply.ok = true
+  else
+    reply.error = "unknown security action"
+  end
+end
+
+function handleFacilityFaultMessage(sender, message, reply)
+  local requiredKey = config.facility and config.facility.remoteSensorKey
+  if requiredKey and tostring(message.key or "") ~= tostring(requiredKey) then
+    reply.error = "denied"
+  else
+    local profile = message.profile or message.alarmProfile or "facility_fault"
+    raiseAlarm(tostring(message.reason or "remote facility fault"), nil, "remote:" .. tostring(sender), profile)
+    audit("REMOTE_SENSOR_FAULT", {
+      sender = sender,
+      profile = profile,
+      sensor = message.sensor,
+      detail = message.detail,
+    })
+    reply.ok = true
+  end
+end
+
+function handleUnlockCredentialMessage(sender, message, doorId, reply)
+  local credential = tostring(message.credential or message.badge)
+  local candidates = { credential }
+  if not string.find(credential, ":", 1, true) then
+    appendUnique(candidates, "badge:" .. credential)
+  end
+
+  local actor = "rednet:" .. tostring(sender)
+  local allowed = authorizedCredential(doorId, "badge", candidates, { name = actor })
+  if allowed then
+    local ok, err = unlockDoor(doorId, actor, message.seconds, "rednet_credential")
+    reply.ok = ok
+    reply.error = err
+  else
+    denyAccess(doorId, actor, "rednet", "credential_rejected")
+    reply.error = "denied"
+  end
+end
+
+function handleUnlockMessage(sender, message, reply)
+  local doorId = tostring(message.door or "")
+  local actor = "rednet:" .. tostring(sender)
+  if not config.doors[doorId] then
+    reply.error = "unknown door"
+  elseif message.pin and authorizedPin(doorId, message.pin) then
+    local ok, err = unlockDoor(doorId, actor, message.seconds, "rednet_pin")
+    reply.ok = ok
+    reply.error = err
+  elseif message.credential or message.badge then
+    handleUnlockCredentialMessage(sender, message, doorId, reply)
+  else
+    reply.error = "missing pin or credential"
+  end
+end
+
+function handleResetAlarmMessage(sender, message, reply)
+  if authorizedAdminPin(message.adminPin) then
+    resetAlarm("rednet:" .. tostring(sender))
+    reply.ok = true
+  else
+    reply.error = "denied"
+  end
+end
+
+function handleRednetOperation(sender, message, reply)
+  local op = message.op
+  if op == "status" then
+    handleStatusMessage(reply)
+  elseif op == "kiosk_hello" then
+    handleKioskHelloMessage(reply)
+  elseif op == "kiosk_login" then
+    handleKioskLoginMessage(sender, message, reply)
+  elseif op == "kiosk_register" then
+    handleKioskRegisterMessage(message, reply)
+  elseif op == "kiosk_logout" then
+    handleKioskLogoutMessage(message, reply)
+  elseif op == "kiosk_notes" then
+    handleKioskNotesMessage(message, reply)
+  elseif op == "kiosk_save_note" then
+    handleKioskSaveNoteMessage(message, reply)
+  elseif op == "kiosk_delete_note" then
+    handleKioskDeleteNoteMessage(message, reply)
+  elseif op == "kiosk_feed" then
+    handleKioskFeedMessage(message, reply)
+  elseif op == "kiosk_post" then
+    handleKioskPostMessage(message, reply)
+  elseif op == "kiosk_inbox" then
+    handleKioskInboxMessage(message, reply)
+  elseif op == "kiosk_send" then
+    handleKioskSendMessage(message, reply)
+  elseif op == "kiosk_people" then
+    handleKioskPeopleMessage(message, reply)
+  elseif op == "kiosk_status" then
+    handleKioskStatusMessage(message, reply)
+  elseif op == "kiosk_logs" then
+    handleKioskLogsMessage(message, reply)
+  elseif op == "kiosk_security_action" then
+    handleKioskSecurityActionMessage(sender, message, reply)
+  elseif op == "facility_fault" then
+    handleFacilityFaultMessage(sender, message, reply)
+  elseif op == "unlock" then
+    handleUnlockMessage(sender, message, reply)
+  elseif op == "reset_alarm" then
+    handleResetAlarmMessage(sender, message, reply)
+  else
+    reply.error = "unknown op"
+  end
+end
+
 function handleRednet(sender, message, protocol)
   local wantedProtocol = config.rednet.protocol or PROTOCOL
   if protocol ~= wantedProtocol then
@@ -2552,242 +2873,7 @@ function handleRednet(sender, message, protocol)
   end
 
   local reply = { ok = false }
-
-  if message.op == "status" then
-    reply.ok = true
-    reply.status = statusSnapshot()
-  elseif message.op == "kiosk_hello" then
-    reply.ok = true
-    reply.serverId = os.getComputerID and os.getComputerID() or nil
-    reply.branding = publicBrandPayload()
-    reply.status = statusSnapshot()
-  elseif message.op == "kiosk_login" then
-    local ok, record = verifyEmployee(message.username, message.pin)
-    if ok then
-      reply.ok = true
-      reply.token = createSession(record.username)
-      reply.user = publicEmployee(record)
-      reply.branding = publicBrandPayload()
-      audit("EMPLOYEE_LOGIN", { user = record.username, sender = sender })
-    else
-      reply.error = "invalid login"
-      audit("EMPLOYEE_LOGIN_DENIED", { user = message.username, sender = sender })
-    end
-  elseif message.op == "kiosk_register" then
-    local ok, err = registerEmployee(message.username, message.pin, message.displayName)
-    reply.ok = ok
-    reply.error = err
-    reply.branding = publicBrandPayload()
-  elseif message.op == "kiosk_logout" then
-    if message.token then
-      state.sessions[tostring(message.token)] = nil
-    end
-    reply.ok = true
-  elseif message.op == "kiosk_notes" then
-    local record = sessionRecord(message.token)
-    if record then
-      reply.ok = true
-      reply.notes = notesFor(record.username)
-    else
-      reply.error = "session expired"
-    end
-  elseif message.op == "kiosk_save_note" then
-    local record = sessionRecord(message.token)
-    if record then
-      local ok, id, err = addEmployeeNote(record, message.title or "Untitled", message.body or "", message.id)
-      reply.ok = ok
-      reply.id = id
-      reply.error = err
-    else
-      reply.error = "session expired"
-    end
-  elseif message.op == "kiosk_delete_note" then
-    local record = sessionRecord(message.token)
-    if record then
-      reply.ok = deleteEmployeeNote(record, tostring(message.id or ""))
-      if not reply.ok then
-        reply.error = "note not found"
-      end
-    else
-      reply.error = "session expired"
-    end
-  elseif message.op == "kiosk_feed" then
-    local record = sessionRecord(message.token)
-    if record then
-      reply.ok = true
-      reply.feed = state.social.feed
-    else
-      reply.error = "session expired"
-    end
-  elseif message.op == "kiosk_post" then
-    local record, err = requireEmployeePermission(message.token, "postFeed")
-    if record then
-      reply.ok = true
-      reply.post = addFeedPost(record, message.text or "")
-    else
-      reply.error = err
-    end
-  elseif message.op == "kiosk_inbox" then
-    local record = sessionRecord(message.token)
-    if record then
-      reply.ok = true
-      reply.messages = socialMailbox(record.username)
-    else
-      reply.error = "session expired"
-    end
-  elseif message.op == "kiosk_send" then
-    local record, err = requireEmployeePermission(message.token, "sendMessage")
-    if record then
-      local ok, err = sendDirectMessage(record, message.to, message.text or "")
-      reply.ok = ok
-      reply.error = err
-    else
-      reply.error = err
-    end
-  elseif message.op == "kiosk_people" then
-    local record = sessionRecord(message.token)
-    if record then
-      reply.ok = true
-      reply.people = employeeList()
-    else
-      reply.error = "session expired"
-    end
-  elseif message.op == "kiosk_status" then
-    local record, err = requireEmployeePermission(message.token, "viewStatus")
-    if record then
-      reply.ok = true
-      reply.status = statusSnapshot()
-    else
-      reply.error = err
-    end
-  elseif message.op == "kiosk_logs" then
-    local record, err = requireEmployeePermission(message.token, "viewLogs")
-    if record then
-      reply.ok = true
-      reply.logs = readFacilityLogsFor(record, message.limit)
-      reply.clearance = employeeClearance(record)
-    else
-      reply.error = err
-    end
-  elseif message.op == "kiosk_security_action" then
-    local action = tostring(message.action or "")
-    local permission = "triggerAlarm"
-    if action == "emergency" then
-      permission = "triggerEmergency"
-    elseif action == "reset_alarm" then
-      permission = "resetAlarm"
-    elseif action == "lockdown" or action == "unlockdown" then
-      permission = "lockdown"
-    elseif action == "unlock_door" or action == "lock_door" then
-      permission = "operateDoors"
-    elseif action == "quit_kiosk" then
-      permission = "quitKiosk"
-    end
-
-    local record, err = requireEmployeePermission(message.token, permission)
-    if not record then
-      reply.error = err
-    elseif action == "emergency" then
-      raiseAlarm(tostring(message.reason or "employee emergency"), nil, record.username, "emergency")
-      reply.ok = true
-    elseif action == "alarm" then
-      raiseAlarm(tostring(message.reason or "employee alarm"), nil, record.username, message.profile or "security")
-      reply.ok = true
-    elseif action == "reset_alarm" then
-      resetAlarm(record.username)
-      reply.ok = true
-    elseif action == "lockdown" then
-      state.lockdown = true
-      for _, doorId in ipairs(tableKeys(config.doors)) do
-        lockDoor(doorId, "employee_lockdown", true)
-      end
-      audit("LOCKDOWN", { actor = record.username, source = "kiosk" })
-      markDirty()
-      broadcastAlarmState()
-      reply.ok = true
-    elseif action == "unlockdown" then
-      state.lockdown = false
-      audit("LOCKDOWN_CLEAR", { actor = record.username, source = "kiosk" })
-      markDirty()
-      broadcastAlarmState()
-      reply.ok = true
-    elseif action == "unlock_door" then
-      local doorId = tostring(message.door or "")
-      if config.doors[doorId] then
-        local ok, doorErr = unlockDoor(doorId, record.username, message.seconds, "employee")
-        reply.ok = ok
-        reply.error = doorErr
-      else
-        reply.error = "unknown door"
-      end
-    elseif action == "lock_door" then
-      local doorId = tostring(message.door or "")
-      if config.doors[doorId] then
-        local ok, doorErr = lockDoor(doorId, "employee")
-        reply.ok = ok
-        reply.error = doorErr
-      else
-        reply.error = "unknown door"
-      end
-    elseif action == "quit_kiosk" then
-      audit("KIOSK_QUIT", { actor = record.username, sender = sender })
-      reply.ok = true
-    else
-      reply.error = "unknown security action"
-    end
-  elseif message.op == "facility_fault" then
-    local requiredKey = config.facility and config.facility.remoteSensorKey
-    if requiredKey and tostring(message.key or "") ~= tostring(requiredKey) then
-      reply.error = "denied"
-    else
-      local profile = message.profile or message.alarmProfile or "facility_fault"
-      raiseAlarm(tostring(message.reason or "remote facility fault"), nil, "remote:" .. tostring(sender), profile)
-      audit("REMOTE_SENSOR_FAULT", {
-        sender = sender,
-        profile = profile,
-        sensor = message.sensor,
-        detail = message.detail,
-      })
-      reply.ok = true
-    end
-  elseif message.op == "unlock" then
-    local doorId = tostring(message.door or "")
-    if not config.doors[doorId] then
-      reply.error = "unknown door"
-    elseif message.pin and authorizedPin(doorId, message.pin) then
-      local ok, err = unlockDoor(doorId, "rednet:" .. tostring(sender), message.seconds, "rednet_pin")
-      reply.ok = ok
-      reply.error = err
-    elseif message.credential or message.badge then
-      local credential = tostring(message.credential or message.badge)
-      local candidates = { credential }
-      if not string.find(credential, ":", 1, true) then
-        appendUnique(candidates, "badge:" .. credential)
-      end
-
-      local allowed = authorizedCredential(doorId, "badge", candidates, { name = "rednet:" .. tostring(sender) })
-      if allowed then
-        local ok, err = unlockDoor(doorId, "rednet:" .. tostring(sender), message.seconds, "rednet_credential")
-        reply.ok = ok
-        reply.error = err
-      else
-        denyAccess(doorId, "rednet:" .. tostring(sender), "rednet", "credential_rejected")
-        reply.error = "denied"
-      end
-    else
-      reply.error = "missing pin or credential"
-    end
-  elseif message.op == "reset_alarm" then
-    if authorizedAdminPin(message.adminPin) then
-      resetAlarm("rednet:" .. tostring(sender))
-      reply.ok = true
-    else
-      reply.error = "denied"
-    end
-  else
-    reply.error = "unknown op"
-  end
-
+  handleRednetOperation(sender, message, reply)
   reply.requestId = message.requestId
   pcall(rednet.send, sender, reply, wantedProtocol)
 end
