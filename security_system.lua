@@ -55,6 +55,25 @@ local defaultConfig = {
     maxMessageLength = 512,
     maxFeedItems = 100,
     sessionSeconds = 1800,
+    defaultClearance = 1,
+    clearanceLevels = {
+      employee = 1,
+      operator = 2,
+      security = 3,
+      manager = 4,
+      admin = 5,
+    },
+    permissions = {
+      postFeed = 1,
+      sendMessage = 1,
+      viewStatus = 1,
+      triggerEmergency = 1,
+      triggerAlarm = 2,
+      resetAlarm = 3,
+      operateDoors = 3,
+      lockdown = 4,
+      manageEmployees = 5,
+    },
     initialAccounts = {
       -- admin = { pin = "2468", displayName = "Facility Admin", role = "admin" },
     },
@@ -63,6 +82,49 @@ local defaultConfig = {
   monitors = {
     enabled = true,
     textScale = 0.5,
+    refreshSeconds = 2,
+    rotateSeconds = 14,
+    posterSeconds = 10,
+    defaultView = "overview",
+    alarmBanner = true,
+    viewRotation = { "overview", "facility", "doors", "security", "posters" },
+    devices = {
+      -- monitor_0 = { view = "overview", textScale = 0.5 },
+      -- right = { view = "posters", textScale = 1 },
+      -- ["*"] = { view = "cycle" },
+    },
+    posters = {
+      {
+        title = "WORK SAFELY",
+        subtitle = "Report faults before faults report you",
+        body = {
+          "Use emergency buttons for immediate hazards.",
+          "Keep badges visible in restricted zones.",
+        },
+        footer = "Facility Safety Office",
+        theme = "blue",
+      },
+      {
+        title = "ACCESS IS A PRIVILEGE",
+        subtitle = "Every door event is logged",
+        body = {
+          "Do not share badges, PINs, or kiosk sessions.",
+          "Security clearance protects the whole facility.",
+        },
+        footer = "Security Directorate",
+        theme = "red",
+      },
+      {
+        title = "POWER KEEPS US MOVING",
+        subtitle = "Watch load, stress, and capacity",
+        body = {
+          "Unusual readings require immediate maintenance.",
+          "Create kinetic faults route to power alarms.",
+        },
+        footer = "Engineering",
+        theme = "green",
+      },
+    },
   },
 
   alarm = {
@@ -72,6 +134,31 @@ local defaultConfig = {
     sounds = {
       { name = "minecraft:block.note_block.pling", volume = 3, pitch = 0.6 },
       { name = "minecraft:block.note_block.bell", volume = 3, pitch = 1.8 },
+    },
+    dsp = {
+      enabled = true,
+      volume = 1.2,
+      sampleRate = 48000,
+      duration = 0.35,
+      patterns = {
+        security = {
+          { freq = 880, sweep = 220, duration = 0.18, gain = 0.85 },
+          { freq = 660, sweep = -120, duration = 0.14, gain = 0.7 },
+        },
+        power_fault = {
+          { freq = 220, sweep = 180, duration = 0.22, gain = 0.9 },
+          { freq = 330, sweep = 80, duration = 0.18, gain = 0.75 },
+        },
+        facility_fault = {
+          { freq = 440, sweep = -80, duration = 0.16, gain = 0.65 },
+          { freq = 520, sweep = 140, duration = 0.16, gain = 0.65 },
+        },
+        emergency = {
+          { freq = 960, sweep = 420, duration = 0.2, gain = 0.95 },
+          { freq = 1280, sweep = -360, duration = 0.18, gain = 0.9 },
+          { freq = 720, sweep = 540, duration = 0.16, gain = 0.9 },
+        },
+      },
     },
     outputs = {
       -- { side = "top" },
@@ -93,6 +180,14 @@ local defaultConfig = {
         sounds = {
           { name = "minecraft:block.note_block.bit", volume = 3, pitch = 0.8 },
           { name = "minecraft:block.note_block.bit", volume = 3, pitch = 1.6 },
+        },
+      },
+      emergency = {
+        label = "Emergency Alarm",
+        repeatSeconds = 0.9,
+        sounds = {
+          { name = "minecraft:block.note_block.bell", volume = 3, pitch = 2.0 },
+          { name = "minecraft:block.note_block.pling", volume = 3, pitch = 0.5 },
         },
       },
     },
@@ -159,6 +254,10 @@ local defaultConfig = {
     --   maxLoad = 0.9,
     --   profile = "power_fault",
     -- },
+  },
+
+  emergencyButtons = {
+    -- { name = "Lobby Emergency Button", input = { side = "top" }, activeWhen = true },
   },
 
   generators = {
@@ -351,6 +450,18 @@ local function applyDefaults(userConfig)
       merged.alarm.profiles[key] = shallowCopy(value)
     end
   end
+  merged.alarm.dsp = merged.alarm.dsp or shallowCopy(defaultConfig.alarm.dsp)
+  for key, value in pairs(defaultConfig.alarm.dsp) do
+    if merged.alarm.dsp[key] == nil then
+      merged.alarm.dsp[key] = shallowCopy(value)
+    end
+  end
+  merged.alarm.dsp.patterns = merged.alarm.dsp.patterns or shallowCopy(defaultConfig.alarm.dsp.patterns)
+  for key, value in pairs(defaultConfig.alarm.dsp.patterns) do
+    if merged.alarm.dsp.patterns[key] == nil then
+      merged.alarm.dsp.patterns[key] = shallowCopy(value)
+    end
+  end
 
   merged.rednet = merged.rednet or shallowCopy(defaultConfig.rednet)
   for key, value in pairs(defaultConfig.rednet) do
@@ -363,6 +474,18 @@ local function applyDefaults(userConfig)
   for key, value in pairs(defaultConfig.employees) do
     if merged.employees[key] == nil then
       merged.employees[key] = shallowCopy(value)
+    end
+  end
+  merged.employees.clearanceLevels = merged.employees.clearanceLevels or shallowCopy(defaultConfig.employees.clearanceLevels)
+  for key, value in pairs(defaultConfig.employees.clearanceLevels) do
+    if merged.employees.clearanceLevels[key] == nil then
+      merged.employees.clearanceLevels[key] = value
+    end
+  end
+  merged.employees.permissions = merged.employees.permissions or shallowCopy(defaultConfig.employees.permissions)
+  for key, value in pairs(defaultConfig.employees.permissions) do
+    if merged.employees.permissions[key] == nil then
+      merged.employees.permissions[key] = value
     end
   end
 
@@ -391,6 +514,7 @@ local function applyDefaults(userConfig)
   merged.doors = merged.doors or shallowCopy(defaultConfig.doors)
   merged.readers = merged.readers or shallowCopy(defaultConfig.readers)
   merged.sensors = merged.sensors or {}
+  merged.emergencyButtons = merged.emergencyButtons or {}
   merged.generators = merged.generators or {}
   merged.facilityName = merged.facilityName or merged.siteName or merged.branding.facilityName
   if merged.branding.facilityName == defaultConfig.branding.facilityName and merged.facilityName ~= defaultConfig.facilityName then
@@ -788,6 +912,7 @@ local function alarmProfile(profileName)
     chat = profile.chat ~= nil and profile.chat or alarm.chat,
     repeatSeconds = profile.repeatSeconds or alarm.repeatSeconds or 1.5,
     sounds = profile.sounds or alarm.sounds or {},
+    dsp = profile.dsp or alarm.dsp,
     outputs = profile.outputs or profile.output or alarm.outputs or alarm.output,
   }
 end
@@ -816,24 +941,97 @@ local function setAlarmOutputs(active)
   setOutputList(profile.outputs, active)
 end
 
+local function clampSample(value)
+  value = math.floor(value)
+  if value > 127 then
+    return 127
+  end
+  if value < -128 then
+    return -128
+  end
+  return value
+end
+
+local function dspPattern(profile)
+  local dsp = profile.dsp or {}
+  local patterns = dsp.patterns or {}
+  return patterns[profile.name or "security"] or patterns.security
+end
+
+local function buildDspAlarmBuffer(profile)
+  local dsp = profile.dsp or {}
+  if dsp.enabled == false then
+    return nil
+  end
+
+  local pattern = dspPattern(profile)
+  if type(pattern) ~= "table" or #pattern == 0 then
+    return nil
+  end
+
+  local sampleRate = tonumber(dsp.sampleRate) or 48000
+  local buffer = {}
+  local phase = 0
+
+  for _, tone in ipairs(pattern) do
+    local duration = tonumber(tone.duration) or tonumber(dsp.duration) or 0.25
+    local samples = math.max(1, math.floor(sampleRate * duration))
+    local startFreq = tonumber(tone.freq) or 660
+    local sweep = tonumber(tone.sweep) or 0
+    local gain = tonumber(tone.gain) or 0.75
+
+    for index = 1, samples do
+      local progress = index / samples
+      local freq = startFreq + sweep * progress
+      phase = (phase + (2 * math.pi * freq / sampleRate)) % (2 * math.pi)
+
+      local envelope = 1
+      if progress < 0.12 then
+        envelope = progress / 0.12
+      elseif progress > 0.88 then
+        envelope = (1 - progress) / 0.12
+      end
+
+      local warble = math.sin(progress * math.pi * 16) * 0.22
+      local harmonic = math.sin(phase * 2.01) * 0.24
+      local sample = (math.sin(phase) + harmonic + warble) * 92 * gain * envelope
+      buffer[#buffer + 1] = clampSample(sample)
+    end
+  end
+
+  return buffer
+end
+
+local function playDspAlarm(profile, speaker)
+  if not (speaker and speaker.playAudio) then
+    return false
+  end
+
+  local buffer = buildDspAlarmBuffer(profile)
+  if not buffer or #buffer == 0 then
+    return false
+  end
+
+  local dsp = profile.dsp or {}
+  local ok, accepted = pcall(speaker.playAudio, buffer, tonumber(dsp.volume) or 1)
+  return ok and accepted ~= false
+end
+
 local function playAlarmPulse()
   local profile = alarmProfile(state.alarm.profile)
   local sounds = profile.sounds or {}
-  if #sounds == 0 then
-    return
-  end
-
   local sound = sounds[state.alarm.soundIndex] or sounds[1]
   state.alarm.soundIndex = state.alarm.soundIndex + 1
-  if state.alarm.soundIndex > #sounds then
+  if #sounds > 0 and state.alarm.soundIndex > #sounds then
     state.alarm.soundIndex = 1
   end
 
   for _, speaker in ipairs(findSpeakers()) do
-    if speaker.playSound then
+    local played = playDspAlarm(profile, speaker)
+    if (not played) and sound and speaker.playSound then
       pcall(speaker.playSound, sound.name, sound.volume or 2, sound.pitch or 1)
-    elseif speaker.playNote then
-      pcall(speaker.playNote, "pling", sound.volume or 2, sound.pitch or 1)
+    elseif (not played) and speaker.playNote then
+      pcall(speaker.playNote, "pling", sound and sound.volume or 2, sound and sound.pitch or 1)
     end
   end
 end
@@ -847,6 +1045,27 @@ end
 local function raiseAlarm(reason, doorId, actor, profileName)
   profileName = profileName or "security"
   if state.alarm.active then
+    if profileName == "emergency" and state.alarm.profile ~= "emergency" then
+      setAlarmOutputs(false)
+      state.alarm.reason = reason or "emergency"
+      state.alarm.door = doorId
+      state.alarm.actor = actor
+      state.alarm.profile = "emergency"
+      state.alarm.soundIndex = 1
+      setAlarmOutputs(true)
+      playAlarmPulse()
+      local profile = alarmProfile("emergency")
+      sendChat((profile.label or "EMERGENCY") .. ": " .. state.alarm.reason, "emergency")
+      audit("ALARM_ESCALATED", {
+        reason = state.alarm.reason,
+        door = doorId,
+        actor = actor,
+        profile = "emergency",
+      })
+      markDirty()
+      return
+    end
+
     audit("ALARM_UPDATE", {
       reason = reason,
       door = doorId,
@@ -1425,6 +1644,32 @@ local function checkDoorSensors()
   end
 end
 
+local function checkEmergencyButtons()
+  for index, button in ipairs(config.emergencyButtons or {}) do
+    local input = button.input or button
+    local active, raw = readEndpoint(input)
+    if raw ~= nil then
+      local pressed = active == expectedValue(input, button.activeWhen ~= false)
+      local key = "emergency:" .. tostring(button.id or button.name or index)
+
+      if pressed and not state.sensors[key] then
+        if button.outputs then
+          setOutputList(button.outputs, true)
+        end
+        raiseAlarm(tostring(button.reason or ("emergency button " .. tostring(button.name or index))), nil, button.actor or "emergency_button", button.profile or "emergency")
+        audit("EMERGENCY_BUTTON", {
+          button = button.name or index,
+          profile = button.profile or "emergency",
+        })
+      elseif (not pressed) and state.sensors[key] and button.outputs then
+        setOutputList(button.outputs, false)
+      end
+
+      state.sensors[key] = pressed
+    end
+  end
+end
+
 local function callPeripheralValue(sensor, methodName)
   local peripheralName = sensor.peripheral or sensor.name
   if not peripheralName or not methodName then
@@ -1736,6 +1981,7 @@ local function pollInputs()
   pollGenericBadgeReaders()
   pollPlayerDetectors()
   checkDoorSensors()
+  checkEmergencyButtons()
   checkGlobalSensors()
 end
 
@@ -1805,6 +2051,7 @@ local function loadEmployeeData()
         displayName = record.displayName or username,
         pin = tostring(record.pin or ""),
         role = record.role or "employee",
+        clearance = record.clearance,
         disabled = record.disabled or false,
         createdAt = timestamp(),
       }
@@ -1836,6 +2083,8 @@ local function employeeRecord(username)
   return state.accounts.users[normalizeUsername(username)]
 end
 
+local employeeClearance
+
 local function publicEmployee(record)
   if not record then
     return nil
@@ -1844,6 +2093,7 @@ local function publicEmployee(record)
     username = record.username,
     displayName = record.displayName or record.username,
     role = record.role or "employee",
+    clearance = employeeClearance and employeeClearance(record) or record.clearance,
   }
 end
 
@@ -1884,8 +2134,31 @@ local function sessionRecord(token)
   return employeeRecord(session.username)
 end
 
+function employeeClearance(record)
+  if not record then
+    return 0
+  end
+
+  local direct = tonumber(record.clearance)
+  if direct then
+    return direct
+  end
+
+  local levels = config.employees and config.employees.clearanceLevels or {}
+  return tonumber(levels[record.role or "employee"]) or tonumber(config.employees and config.employees.defaultClearance) or 1
+end
+
+local function permissionLevel(permission)
+  local permissions = config.employees and config.employees.permissions or {}
+  return tonumber(permissions[permission]) or 999
+end
+
+local function employeeCan(record, permission)
+  return employeeClearance(record) >= permissionLevel(permission)
+end
+
 local function employeeIsAdmin(record)
-  return record and (record.role == "admin" or record.role == "security" or record.role == "manager")
+  return employeeCan(record, "manageEmployees")
 end
 
 local function registerEmployee(username, pin, displayName)
@@ -1909,6 +2182,7 @@ local function registerEmployee(username, pin, displayName)
     displayName = displayName and tostring(displayName) ~= "" and tostring(displayName) or key,
     pin = tostring(pin),
     role = (config.employees and config.employees.defaultRole) or "employee",
+    clearance = config.employees and config.employees.defaultClearance or 1,
     createdAt = timestamp(),
   }
   saveAccounts()
@@ -1921,6 +2195,22 @@ local function notesFor(username)
   local key = normalizeUsername(username)
   state.accounts.notes[key] = state.accounts.notes[key] or {}
   return state.accounts.notes[key]
+end
+
+local function findEmployeeNote(record, noteId)
+  local notes = notesFor(record.username)
+  noteId = tostring(noteId or "")
+  if noteId == "" then
+    return nil, nil
+  end
+
+  for index, note in ipairs(notes) do
+    if tostring(note.id) == noteId then
+      return note, index
+    end
+  end
+
+  return nil, nil
 end
 
 local function socialMailbox(username)
@@ -1942,31 +2232,36 @@ end
 local function addEmployeeNote(record, title, body, noteId)
   local notes = notesFor(record.username)
   local maxLength = (config.employees and config.employees.maxNoteLength) or 4096
-  local id = tostring(noteId or makeId("note"))
-  local found = false
+  local id = tostring(noteId or "")
 
-  for _, note in ipairs(notes) do
-    if note.id == id then
-      note.title = capEmployeeText(title, 80)
-      note.body = capEmployeeText(body, maxLength)
-      note.updatedAt = timestamp()
-      found = true
-      break
+  if id ~= "" then
+    local note, index = findEmployeeNote(record, id)
+    if not note then
+      return false, nil, "note not found"
     end
+
+    note.title = capEmployeeText(title, 80)
+    note.body = capEmployeeText(body, maxLength)
+    note.updatedAt = timestamp()
+    if index and index > 1 then
+      table.remove(notes, index)
+      table.insert(notes, 1, note)
+    end
+    saveAccounts()
+    return true, id
   end
 
-  if not found then
-    table.insert(notes, {
-      id = id,
-      title = capEmployeeText(title, 80),
-      body = capEmployeeText(body, maxLength),
-      createdAt = timestamp(),
-      updatedAt = timestamp(),
-    })
-  end
+  id = makeId("note")
+  table.insert(notes, 1, {
+    id = id,
+    title = capEmployeeText(title, 80),
+    body = capEmployeeText(body, maxLength),
+    createdAt = timestamp(),
+    updatedAt = timestamp(),
+  })
 
   saveAccounts()
-  return id
+  return true, id
 end
 
 local function deleteEmployeeNote(record, noteId)
@@ -2034,6 +2329,17 @@ local function employeeList()
     end
   end
   return out
+end
+
+local function requireEmployeePermission(token, permission)
+  local record = sessionRecord(token)
+  if not record then
+    return nil, "session expired"
+  end
+  if not employeeCan(record, permission) then
+    return nil, "clearance denied"
+  end
+  return record
 end
 
 local function statusSnapshot()
@@ -2128,8 +2434,10 @@ local function handleRednet(sender, message, protocol)
   elseif message.op == "kiosk_save_note" then
     local record = sessionRecord(message.token)
     if record then
-      reply.ok = true
-      reply.id = addEmployeeNote(record, message.title or "Untitled", message.body or "", message.id)
+      local ok, id, err = addEmployeeNote(record, message.title or "Untitled", message.body or "", message.id)
+      reply.ok = ok
+      reply.id = id
+      reply.error = err
     else
       reply.error = "session expired"
     end
@@ -2152,12 +2460,12 @@ local function handleRednet(sender, message, protocol)
       reply.error = "session expired"
     end
   elseif message.op == "kiosk_post" then
-    local record = sessionRecord(message.token)
+    local record, err = requireEmployeePermission(message.token, "postFeed")
     if record then
       reply.ok = true
       reply.post = addFeedPost(record, message.text or "")
     else
-      reply.error = "session expired"
+      reply.error = err
     end
   elseif message.op == "kiosk_inbox" then
     local record = sessionRecord(message.token)
@@ -2168,13 +2476,13 @@ local function handleRednet(sender, message, protocol)
       reply.error = "session expired"
     end
   elseif message.op == "kiosk_send" then
-    local record = sessionRecord(message.token)
+    local record, err = requireEmployeePermission(message.token, "sendMessage")
     if record then
       local ok, err = sendDirectMessage(record, message.to, message.text or "")
       reply.ok = ok
       reply.error = err
     else
-      reply.error = "session expired"
+      reply.error = err
     end
   elseif message.op == "kiosk_people" then
     local record = sessionRecord(message.token)
@@ -2185,12 +2493,71 @@ local function handleRednet(sender, message, protocol)
       reply.error = "session expired"
     end
   elseif message.op == "kiosk_status" then
-    local record = sessionRecord(message.token)
+    local record, err = requireEmployeePermission(message.token, "viewStatus")
     if record then
       reply.ok = true
       reply.status = statusSnapshot()
     else
-      reply.error = "session expired"
+      reply.error = err
+    end
+  elseif message.op == "kiosk_security_action" then
+    local action = tostring(message.action or "")
+    local permission = "triggerAlarm"
+    if action == "emergency" then
+      permission = "triggerEmergency"
+    elseif action == "reset_alarm" then
+      permission = "resetAlarm"
+    elseif action == "lockdown" or action == "unlockdown" then
+      permission = "lockdown"
+    elseif action == "unlock_door" or action == "lock_door" then
+      permission = "operateDoors"
+    end
+
+    local record, err = requireEmployeePermission(message.token, permission)
+    if not record then
+      reply.error = err
+    elseif action == "emergency" then
+      raiseAlarm(tostring(message.reason or "employee emergency"), nil, record.username, "emergency")
+      reply.ok = true
+    elseif action == "alarm" then
+      raiseAlarm(tostring(message.reason or "employee alarm"), nil, record.username, message.profile or "security")
+      reply.ok = true
+    elseif action == "reset_alarm" then
+      resetAlarm(record.username)
+      reply.ok = true
+    elseif action == "lockdown" then
+      state.lockdown = true
+      for _, doorId in ipairs(tableKeys(config.doors)) do
+        lockDoor(doorId, "employee_lockdown", true)
+      end
+      audit("LOCKDOWN", { actor = record.username, source = "kiosk" })
+      markDirty()
+      reply.ok = true
+    elseif action == "unlockdown" then
+      state.lockdown = false
+      audit("LOCKDOWN_CLEAR", { actor = record.username, source = "kiosk" })
+      markDirty()
+      reply.ok = true
+    elseif action == "unlock_door" then
+      local doorId = tostring(message.door or "")
+      if config.doors[doorId] then
+        local ok, doorErr = unlockDoor(doorId, record.username, message.seconds, "employee")
+        reply.ok = ok
+        reply.error = doorErr
+      else
+        reply.error = "unknown door"
+      end
+    elseif action == "lock_door" then
+      local doorId = tostring(message.door or "")
+      if config.doors[doorId] then
+        local ok, doorErr = lockDoor(doorId, "employee")
+        reply.ok = ok
+        reply.error = doorErr
+      else
+        reply.error = "unknown door"
+      end
+    else
+      reply.error = "unknown security action"
     end
   elseif message.op == "facility_fault" then
     local requiredKey = config.facility and config.facility.remoteSensorKey
@@ -2262,59 +2629,480 @@ local function monitorNames()
   return out
 end
 
+local function monitorDeviceConfig(name)
+  local monitors = config.monitors or {}
+  local devices = monitors.devices or monitors.monitors or {}
+  if type(devices) ~= "table" then
+    devices = {}
+  end
+  local device = devices[name] or devices["*"] or {}
+  if type(device) == "string" then
+    return { view = device }
+  end
+  if type(device) ~= "table" then
+    return {}
+  end
+  return device
+end
+
+local function monitorTheme(theme)
+  local themes = {
+    blue = { bg = colors.blue, fg = colors.white, accent = colors.cyan, dim = colors.lightBlue },
+    red = { bg = colors.red, fg = colors.white, accent = colors.yellow, dim = colors.orange },
+    green = { bg = colors.green, fg = colors.black, accent = colors.lime, dim = colors.white },
+    black = { bg = colors.black, fg = colors.white, accent = colors.cyan, dim = colors.lightGray },
+    gray = { bg = colors.gray, fg = colors.white, accent = colors.lime, dim = colors.lightGray },
+    purple = { bg = colors.purple, fg = colors.white, accent = colors.pink, dim = colors.magenta },
+  }
+
+  if type(theme) == "table" then
+    return {
+      bg = colorValue(theme.bg or theme.background, colors.black),
+      fg = colorValue(theme.fg or theme.text, colors.white),
+      accent = colorValue(theme.accent, colors.lime),
+      dim = colorValue(theme.dim, colors.lightGray),
+    }
+  end
+
+  return themes[tostring(theme or "black")] or themes.black
+end
+
+local function monitorWrite(monitor, x, y, text, fg, bg, width)
+  if y < 1 then
+    return
+  end
+
+  local totalWidth, totalHeight = monitor.getSize()
+  if y > totalHeight then
+    return
+  end
+
+  local maxWidth = width
+  if maxWidth == nil then
+    maxWidth = totalWidth - x + 1
+  end
+  if maxWidth <= 0 then
+    return
+  end
+
+  if bg then
+    monitor.setBackgroundColor(bg)
+  end
+  if fg then
+    monitor.setTextColor(fg)
+  end
+  monitor.setCursorPos(x, y)
+  monitor.write(string.sub(tostring(text or ""), 1, maxWidth))
+end
+
+local function monitorFill(monitor, y, bg, fg, text)
+  local width, height = monitor.getSize()
+  if y < 1 or y > height then
+    return
+  end
+  monitor.setCursorPos(1, y)
+  monitor.setBackgroundColor(bg or colors.black)
+  monitor.setTextColor(fg or colors.white)
+  monitor.write(string.rep(" ", width))
+  if text then
+    monitor.setCursorPos(1, y)
+    monitor.write(string.sub(tostring(text), 1, width))
+  end
+end
+
+local function monitorCenter(monitor, y, text, fg, bg)
+  local width = monitor.getSize()
+  text = tostring(text or "")
+  local x = math.max(1, math.floor((width - string.len(text)) / 2) + 1)
+  monitorWrite(monitor, x, y, text, fg, bg, width - x + 1)
+end
+
+local function monitorRule(monitor, y, fg)
+  local width = monitor.getSize()
+  monitorWrite(monitor, 1, y, string.rep("-", width), fg or colors.gray, colors.black, width)
+end
+
+local function monitorBar(monitor, x, y, width, value, fg, bg)
+  width = math.max(3, tonumber(width) or 3)
+  value = tonumber(value) or 0
+  if value < 0 then
+    value = 0
+  elseif value > 1 then
+    value = 1
+  end
+
+  local inner = math.max(1, width - 2)
+  local filled = math.floor(inner * value + 0.5)
+  local text = "[" .. string.rep("#", filled) .. string.rep(".", inner - filled) .. "]"
+  monitorWrite(monitor, x, y, text, fg or colors.lime, bg or colors.black, width)
+end
+
+local function monitorWrap(text, width)
+  local lines = {}
+  width = math.max(1, tonumber(width) or 20)
+  text = tostring(text or "")
+
+  for rawLine in string.gmatch(text .. "\n", "([^\n]*)\n") do
+    local line = rawLine
+    while string.len(line) > width do
+      local cut = width
+      for index = width, 1, -1 do
+        if string.sub(line, index, index) == " " then
+          cut = index
+          break
+        end
+      end
+      table.insert(lines, string.sub(line, 1, cut))
+      line = string.gsub(string.sub(line, cut + 1), "^%s+", "")
+    end
+    table.insert(lines, line)
+  end
+
+  return lines
+end
+
+local function monitorStatusText()
+  if state.alarm.active then
+    local profile = alarmProfile(state.alarm.profile)
+    return tostring(profile.label or "ALARM"), colors.yellow, colors.red
+  end
+  if state.lockdown then
+    return "LOCKDOWN", colors.black, colors.orange
+  end
+  return "SECURE", colors.black, colors.lime
+end
+
+local function drawMonitorHeader(monitor, title, deviceConfig)
+  local width = monitor.getSize()
+  local brand = displayBranding()
+  local theme = monitorTheme(deviceConfig.theme or (config.monitors and config.monitors.theme) or "blue")
+  local shortName = brand.shortName or "SEC"
+  local facility = brand.facilityName or config.siteName or "Facility"
+
+  monitorFill(monitor, 1, theme.bg, theme.fg, " " .. shortName .. " | " .. facility)
+  monitorFill(monitor, 2, colors.black, theme.accent, " " .. tostring(title or "Status"))
+
+  if config.monitors.alarmBanner ~= false and state.alarm.active then
+    local profile = alarmProfile(state.alarm.profile)
+    monitorFill(monitor, 3, colors.red, colors.yellow, " " .. tostring(profile.label or "ALARM") .. ": " .. tostring(state.alarm.reason or ""))
+    return 5
+  end
+
+  local text, fg, bg = monitorStatusText()
+  monitorFill(monitor, 3, bg, fg, " " .. text)
+  return 5
+end
+
+local function countDoorStates()
+  local locked = 0
+  local open = 0
+  local total = 0
+  for _, doorId in ipairs(tableKeys(config.doors)) do
+    total = total + 1
+    if getDoorState(doorId).locked then
+      locked = locked + 1
+    else
+      open = open + 1
+    end
+  end
+  return locked, open, total
+end
+
+local function sensorDisplayName(key)
+  local name = tostring(key or "sensor")
+  name = string.gsub(name, "^sensor:", "")
+  name = string.gsub(name, "^auto_stress:", "")
+  name = string.gsub(name, "^emergency:", "")
+  return name
+end
+
+local function countActiveFaults()
+  local count = 0
+  for key, value in pairs(state.sensors or {}) do
+    if value and (string.find(tostring(key), "sensor:", 1, true) == 1 or string.find(tostring(key), "auto_stress:", 1, true) == 1 or string.find(tostring(key), "emergency:", 1, true) == 1) then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+local function monitorDetailText(detail)
+  if type(detail) ~= "table" then
+    return tostring(detail or "")
+  end
+  if detail.load then
+    return "load " .. tostring(math.floor(detail.load * 100 + 0.5)) .. "%"
+  end
+  if detail.stress or detail.capacity then
+    return "stress " .. tostring(detail.stress or "?") .. "/" .. tostring(detail.capacity or "?")
+  end
+  if detail.value ~= nil then
+    return "value " .. tostring(detail.value)
+  end
+  if detail.raw ~= nil then
+    return "raw " .. tostring(detail.raw)
+  end
+  if detail.active ~= nil then
+    return "active " .. tostring(detail.active)
+  end
+  return compact(detail)
+end
+
+local function drawMonitorOverview(monitor, deviceConfig)
+  local width, height = monitor.getSize()
+  local y = drawMonitorHeader(monitor, "Facility Overview", deviceConfig)
+  local locked, open, total = countDoorStates()
+  local faults = countActiveFaults()
+  local employees = state.accounts and state.accounts.users and #tableKeys(state.accounts.users) or 0
+  local sessions = #tableKeys(state.sessions or {})
+
+  monitorWrite(monitor, 1, y, "Doors", colors.cyan, colors.black, width)
+  monitorWrite(monitor, 1, y + 1, "Locked " .. tostring(locked) .. "/" .. tostring(total) .. "  Open " .. tostring(open), open > 0 and colors.yellow or colors.lime, colors.black, width)
+  y = y + 3
+
+  monitorWrite(monitor, 1, y, "Facility", colors.cyan, colors.black, width)
+  monitorWrite(monitor, 1, y + 1, "Faults " .. tostring(faults) .. "  Employees " .. tostring(employees) .. "  Sessions " .. tostring(sessions), faults > 0 and colors.orange or colors.lightGray, colors.black, width)
+  y = y + 3
+
+  if state.alarm.active then
+    local profile = alarmProfile(state.alarm.profile)
+    monitorWrite(monitor, 1, y, "Active Alarm", colors.yellow, colors.black, width)
+    monitorWrite(monitor, 1, y + 1, tostring(profile.label or "Alarm"), colors.yellow, colors.black, width)
+    monitorWrite(monitor, 1, y + 2, truncate(state.alarm.reason or "", width), colors.white, colors.black, width)
+    y = y + 4
+  end
+
+  monitorWrite(monitor, 1, y, "Recent Doors", colors.cyan, colors.black, width)
+  y = y + 1
+  for _, doorId in ipairs(tableKeys(config.doors)) do
+    if y > height then
+      break
+    end
+    local door = config.doors[doorId]
+    local doorState = getDoorState(doorId)
+    local status = doorState.locked and "LOCKED" or "OPEN"
+    monitorWrite(monitor, 1, y, truncate((door.label or doorId) .. ": " .. status, width), doorState.locked and colors.lightGray or colors.lime, colors.black, width)
+    y = y + 1
+  end
+end
+
+local function drawMonitorDoors(monitor, deviceConfig)
+  local width, height = monitor.getSize()
+  local y = drawMonitorHeader(monitor, "Door Matrix", deviceConfig)
+  monitorWrite(monitor, 1, y, "Door", colors.cyan, colors.black, math.max(1, width - 12))
+  monitorWrite(monitor, math.max(1, width - 8), y, "State", colors.cyan, colors.black, 9)
+  y = y + 1
+  monitorRule(monitor, y, colors.gray)
+  y = y + 1
+
+  for _, doorId in ipairs(tableKeys(config.doors)) do
+    if y > height then
+      break
+    end
+    local door = config.doors[doorId]
+    local doorState = getDoorState(doorId)
+    local label = truncate(door.label or doorId, math.max(8, width - 11))
+    local status = doorState.locked and "LOCKED" or "OPEN"
+    local fg = doorState.locked and colors.lightGray or colors.lime
+    monitorWrite(monitor, 1, y, label, fg, colors.black, math.max(1, width - 11))
+    monitorWrite(monitor, math.max(1, width - 8), y, status, fg, colors.black, 9)
+    y = y + 1
+    if doorState.lastActor and y <= height then
+      monitorWrite(monitor, 3, y, truncate("by " .. tostring(doorState.lastActor), width - 2), colors.gray, colors.black, width - 2)
+      y = y + 1
+    end
+  end
+end
+
+local function drawMonitorFacility(monitor, deviceConfig)
+  local width, height = monitor.getSize()
+  local y = drawMonitorHeader(monitor, "Facility Systems", deviceConfig)
+  monitorWrite(monitor, 1, y, "Sensors / Power", colors.cyan, colors.black, width)
+  y = y + 1
+  monitorRule(monitor, y, colors.gray)
+  y = y + 1
+
+  local keys = tableKeys(state.sensorDetails or {})
+  if #keys == 0 then
+    monitorWrite(monitor, 1, y, "No facility sensor data yet.", colors.lightGray, colors.black, width)
+    return
+  end
+
+  for _, key in ipairs(keys) do
+    if y > height then
+      break
+    end
+    local detail = state.sensorDetails[key]
+    local active = state.sensors and state.sensors[key]
+    local fg = active and colors.orange or colors.lime
+    local name = truncate(sensorDisplayName(key), math.max(8, width - 9))
+    monitorWrite(monitor, 1, y, name, fg, colors.black, math.max(1, width - 9))
+    monitorWrite(monitor, math.max(1, width - 6), y, active and "FAULT" or "OK", fg, colors.black, 6)
+    y = y + 1
+
+    if y > height then
+      break
+    end
+    monitorWrite(monitor, 3, y, truncate(monitorDetailText(detail), width - 2), colors.lightGray, colors.black, width - 2)
+    if type(detail) == "table" and detail.load and width >= 18 then
+      monitorBar(monitor, 3, y + 1, width - 4, detail.load, detail.load >= 0.9 and colors.red or colors.lime, colors.black)
+      y = y + 2
+    else
+      y = y + 1
+    end
+  end
+end
+
+local function drawMonitorSecurity(monitor, deviceConfig)
+  local width, height = monitor.getSize()
+  local y = drawMonitorHeader(monitor, "Security Control", deviceConfig)
+  local profile = alarmProfile(state.alarm.profile)
+  monitorWrite(monitor, 1, y, "Alarm", colors.cyan, colors.black, width)
+  monitorWrite(monitor, 1, y + 1, state.alarm.active and tostring(profile.label or "ACTIVE") or "Clear", state.alarm.active and colors.yellow or colors.lime, colors.black, width)
+  if state.alarm.reason and y + 2 <= height then
+    monitorWrite(monitor, 1, y + 2, truncate(state.alarm.reason, width), colors.white, colors.black, width)
+  end
+  y = y + 4
+
+  if y <= height then
+    monitorWrite(monitor, 1, y, "Lockdown: " .. tostring(state.lockdown), state.lockdown and colors.orange or colors.lightGray, colors.black, width)
+    y = y + 2
+  end
+
+  if y <= height then
+    monitorWrite(monitor, 1, y, "Emergency Buttons", colors.cyan, colors.black, width)
+    y = y + 1
+    for index, button in ipairs(config.emergencyButtons or {}) do
+      if y > height then
+        break
+      end
+      local key = "emergency:" .. tostring(button.id or button.name or index)
+      local active = state.sensors[key]
+      monitorWrite(monitor, 1, y, truncate(tostring(button.name or index), width - 8), active and colors.yellow or colors.lightGray, colors.black, width - 8)
+      monitorWrite(monitor, math.max(1, width - 5), y, active and "PUSH" or "IDLE", active and colors.yellow or colors.lime, colors.black, 6)
+      y = y + 1
+    end
+  end
+end
+
+local function posterList(deviceConfig)
+  local posters = deviceConfig.posters or (config.monitors and config.monitors.posters) or {}
+  if type(posters) ~= "table" then
+    return {}
+  end
+  return posters
+end
+
+local function drawMonitorPoster(monitor, deviceConfig)
+  local width, height = monitor.getSize()
+  local posters = posterList(deviceConfig)
+  if #posters == 0 then
+    drawMonitorHeader(monitor, "Facility Posters", deviceConfig)
+    monitorWrite(monitor, 1, 5, "No posters configured.", colors.lightGray, colors.black, width)
+    return
+  end
+
+  local seconds = tonumber(deviceConfig.posterSeconds or (config.monitors and config.monitors.posterSeconds)) or 10
+  local index = (math.floor(os.clock() / seconds) % #posters) + 1
+  local poster = posters[index]
+  local theme = monitorTheme(poster.theme or deviceConfig.theme or "blue")
+
+  monitor.setBackgroundColor(theme.bg)
+  monitor.setTextColor(theme.fg)
+  monitor.clear()
+
+  local y = 2
+  if config.monitors.alarmBanner ~= false and state.alarm.active then
+    local profile = alarmProfile(state.alarm.profile)
+    monitorFill(monitor, 1, colors.red, colors.yellow, " " .. tostring(profile.label or "ALARM") .. ": " .. tostring(state.alarm.reason or ""))
+    y = 3
+  end
+
+  monitorCenter(monitor, y, truncate(poster.title or "FACILITY NOTICE", width), theme.fg, theme.bg)
+  y = y + 2
+  if poster.subtitle then
+    for _, line in ipairs(monitorWrap(poster.subtitle, width - 2)) do
+      if y > height - 2 then
+        break
+      end
+      monitorCenter(monitor, y, line, theme.accent, theme.bg)
+      y = y + 1
+    end
+    y = y + 1
+  end
+
+  local body = poster.body or {}
+  if type(body) == "string" then
+    body = { body }
+  end
+
+  for _, item in ipairs(body) do
+    for _, line in ipairs(monitorWrap(item, width - 4)) do
+      if y > height - 2 then
+        break
+      end
+      monitorCenter(monitor, y, line, theme.fg, theme.bg)
+      y = y + 1
+    end
+    y = y + 1
+    if y > height - 2 then
+      break
+    end
+  end
+
+  if poster.footer and height >= 3 then
+    monitorFill(monitor, height, theme.bg, theme.dim, truncate(poster.footer, width))
+  end
+end
+
+local function monitorViewFor(name, deviceConfig)
+  local view = tostring(deviceConfig.view or deviceConfig.mode or (config.monitors and config.monitors.defaultView) or "overview")
+  if view == "cycle" or view == "rotate" or view == "slideshow" then
+    local views = deviceConfig.views or (config.monitors and config.monitors.viewRotation) or { "overview", "facility", "doors", "security", "posters" }
+    if type(views) ~= "table" or #views == 0 then
+      return "overview"
+    end
+
+    local seconds = tonumber(deviceConfig.rotateSeconds or (config.monitors and config.monitors.rotateSeconds)) or 14
+    local index = (math.floor(os.clock() / seconds) % #views) + 1
+    return tostring(views[index])
+  end
+  return view
+end
+
 local function drawMonitor(name)
   local monitor = peripheral.wrap(name)
   if not monitor then
     return
   end
 
-  if monitor.setTextScale and config.monitors.textScale then
-    pcall(monitor.setTextScale, config.monitors.textScale)
+  local deviceConfig = monitorDeviceConfig(name)
+  local textScale = deviceConfig.textScale or (config.monitors and config.monitors.textScale)
+  if monitor.setTextScale and textScale then
+    pcall(monitor.setTextScale, textScale)
   end
 
-  local width, height = monitor.getSize()
-  local bg = state.alarm.active and colors.red or colors.black
-  local fg = colors.white
-  monitor.setBackgroundColor(bg)
-  monitor.setTextColor(fg)
+  monitor.setBackgroundColor(colors.black)
+  monitor.setTextColor(colors.white)
   monitor.clear()
 
-  local brand = displayBranding()
-  monitor.setCursorPos(1, 1)
-  monitor.write(string.sub(brand.facilityName or config.siteName or "Security", 1, width))
-
-  monitor.setCursorPos(1, 2)
-  if state.alarm.active then
-    monitor.setTextColor(colors.yellow)
-    local profile = alarmProfile(state.alarm.profile)
-    monitor.write(string.sub((profile.label or "ALARM") .. " " .. tostring(state.alarm.reason or ""), 1, width))
-  elseif state.lockdown then
-    monitor.setTextColor(colors.orange)
-    monitor.write("LOCKDOWN")
+  local view = monitorViewFor(name, deviceConfig)
+  if view == "facility" or view == "systems" or view == "power" then
+    drawMonitorFacility(monitor, deviceConfig)
+  elseif view == "doors" or view == "door" then
+    drawMonitorDoors(monitor, deviceConfig)
+  elseif view == "security" or view == "alarm" then
+    drawMonitorSecurity(monitor, deviceConfig)
+  elseif view == "posters" or view == "poster" or view == "propaganda" then
+    drawMonitorPoster(monitor, deviceConfig)
   else
-    monitor.setTextColor(colors.lime)
-    monitor.write("SECURE")
-  end
-
-  local y = 4
-  for _, doorId in ipairs(tableKeys(config.doors)) do
-    if y > height then
-      break
-    end
-
-    local door = config.doors[doorId]
-    local doorState = getDoorState(doorId)
-    local label = door.label or doorId
-    local status = doorState.locked and "LOCKED" or "OPEN"
-    monitor.setCursorPos(1, y)
-    monitor.setTextColor(doorState.locked and colors.lightGray or colors.lime)
-    monitor.write(string.sub(label .. ": " .. status, 1, width))
-    y = y + 1
+    drawMonitorOverview(monitor, deviceConfig)
   end
 end
 
 local function drawMonitors(force)
-  if not force and not state.screenDirty then
+  local monitors = config.monitors or {}
+  if not force and not state.screenDirty and not monitors.alwaysRedraw then
     return
   end
 
@@ -2425,6 +3213,7 @@ local function printHelp()
     "  unlock <door> [seconds]",
     "  lock <door>",
     "  alarm <reason>",
+    "  emergency <reason>",
     "  reset",
     "  lockdown",
     "  unlockdown",
@@ -2433,6 +3222,7 @@ local function printHelp()
     "  employee list",
     "  employee add <user> <pin> [display name]",
     "  employee role <user> <role>",
+    "  employee clearance <user> <level>",
     "  employee disable <user>",
     "  employee enable <user>",
     "  save",
@@ -2473,7 +3263,7 @@ local function handleEmployeeCommand(words)
 
   if subcommand == "list" then
     for _, person in ipairs(employeeList()) do
-      print(person.username .. " - " .. tostring(person.displayName) .. " (" .. tostring(person.role) .. ")")
+      print(person.username .. " - " .. tostring(person.displayName) .. " (" .. tostring(person.role) .. ", C" .. tostring(person.clearance or "?") .. ")")
     end
   elseif subcommand == "add" then
     local username = normalizeUsername(words[3])
@@ -2492,6 +3282,7 @@ local function handleEmployeeCommand(words)
       displayName = displayName ~= "" and displayName or username,
       pin = tostring(pin),
       role = "employee",
+      clearance = config.employees and config.employees.defaultClearance or 1,
       createdAt = timestamp(),
     }
     saveAccounts()
@@ -2509,6 +3300,18 @@ local function handleEmployeeCommand(words)
     saveAccounts()
     audit("EMPLOYEE_ROLE", { user = username, role = role, actor = "console" })
     print("Updated " .. username)
+  elseif subcommand == "clearance" then
+    local username = normalizeUsername(words[3])
+    local level = tonumber(words[4])
+    local record = employeeRecord(username)
+    if not record or not level then
+      print("Usage: employee clearance <user> <level>")
+      return
+    end
+    record.clearance = level
+    saveAccounts()
+    audit("EMPLOYEE_CLEARANCE", { user = username, clearance = level, actor = "console" })
+    print("Updated " .. username .. " clearance to " .. tostring(level))
   elseif subcommand == "disable" or subcommand == "enable" then
     local username = normalizeUsername(words[3])
     local record = employeeRecord(username)
@@ -2521,7 +3324,7 @@ local function handleEmployeeCommand(words)
     audit("EMPLOYEE_" .. string.upper(subcommand), { user = username, actor = "console" })
     print((record.disabled and "Disabled " or "Enabled ") .. username)
   else
-    print("Usage: employee list|add|role|disable|enable")
+    print("Usage: employee list|add|role|clearance|disable|enable")
   end
 end
 
@@ -2584,6 +3387,11 @@ local function handleCommand(line)
     if requireAdmin() then
       raiseAlarm(joinWords(words, 2) ~= "" and joinWords(words, 2) or "manual alarm", nil, "console")
       print("Alarm raised")
+    end
+  elseif command == "emergency" then
+    if requireAdmin() then
+      raiseAlarm(joinWords(words, 2) ~= "" and joinWords(words, 2) or "manual emergency", nil, "console", "emergency")
+      print("Emergency alarm raised")
     end
   elseif command == "reset" then
     if requireAdmin() then
@@ -2805,9 +3613,73 @@ local function printNotes(notes)
   end
 
   for index, note in ipairs(notes) do
-    print(tostring(index) .. ". " .. truncate(note.title or "Untitled", 24) .. " [" .. tostring(note.id) .. "]")
-    print("   " .. truncate(note.body or "", 44))
+    local updated = note.updatedAt or note.createdAt or ""
+    print(tostring(index) .. ". " .. truncate(note.title or "Untitled", 28))
+    print("   " .. truncate(note.body or "", 42))
+    print("   " .. tostring(updated))
   end
+end
+
+local function noteBySelection(notes, selection)
+  selection = tostring(selection or "")
+  local index = tonumber(selection)
+  if index and notes and notes[index] then
+    return notes[index]
+  end
+
+  for _, note in ipairs(notes or {}) do
+    if tostring(note.id) == selection then
+      return note
+    end
+  end
+
+  return nil
+end
+
+local function readMultilineBody(existing)
+  print("Body. End with a single '.' line.")
+  if existing and existing ~= "" then
+    print("Leave blank then '.' to keep the existing body.")
+  end
+
+  local lines = {}
+  while true do
+    local line = read()
+    if line == "." then
+      break
+    end
+    table.insert(lines, line)
+  end
+
+  if existing and #lines == 0 then
+    return existing
+  end
+
+  return table.concat(lines, "\n")
+end
+
+local function viewKioskNote(brand, user, note)
+  drawKioskHeader(brand, user)
+  if not note then
+    print("Note not found.")
+    pause()
+    return
+  end
+
+  local lines = {
+    "Title: " .. tostring(note.title or "Untitled"),
+    "Created: " .. tostring(note.createdAt or ""),
+    "Updated: " .. tostring(note.updatedAt or ""),
+    "ID: " .. tostring(note.id or ""),
+    "",
+  }
+
+  for line in string.gmatch(tostring(note.body or "") .. "\n", "([^\n]*)\n") do
+    table.insert(lines, line)
+  end
+
+  printPaged(lines)
+  pause()
 end
 
 local function kioskNotes(serverId, brand, token, user)
@@ -2822,36 +3694,48 @@ local function kioskNotes(serverId, brand, token, user)
 
     printNotes(reply.notes)
     print()
-    print("A. Add/update note")
+    print("V. View note")
+    print("A. Add note")
+    print("E. Edit note")
     print("D. Delete note")
     print("B. Back")
     local choice = string.lower(kioskRead("> "))
-    if choice == "a" then
-      local id = kioskRead("Existing note id, or blank: ")
-      if id == "" then
-        id = nil
-      end
+    if choice == "v" then
+      local selected = noteBySelection(reply.notes, kioskRead("Note number or id: "))
+      viewKioskNote(brand, user, selected)
+    elseif choice == "a" then
       local title = kioskRead("Title: ")
-      print("Body. End with a single '.' line.")
-      local lines = {}
-      while true do
-        local line = read()
-        if line == "." then
-          break
-        end
-        table.insert(lines, line)
-      end
+      local body = readMultilineBody()
       local saved = kioskRequest(serverId, "kiosk_save_note", {
         token = token,
-        id = id,
         title = title,
-        body = table.concat(lines, "\n"),
+        body = body,
       })
       print(saved.ok and ("Saved " .. tostring(saved.id)) or ("Failed: " .. tostring(saved.error)))
       pause()
+    elseif choice == "e" then
+      local selected = noteBySelection(reply.notes, kioskRead("Note number or id: "))
+      if not selected then
+        print("Note not found.")
+        pause()
+      else
+        local title = kioskRead("Title [" .. tostring(selected.title or "Untitled") .. "]: ")
+        if title == "" then
+          title = selected.title or "Untitled"
+        end
+        local body = readMultilineBody(selected.body or "")
+        local saved = kioskRequest(serverId, "kiosk_save_note", {
+          token = token,
+          id = selected.id,
+          title = title,
+          body = body,
+        })
+        print(saved.ok and ("Updated " .. tostring(saved.id)) or ("Failed: " .. tostring(saved.error)))
+        pause()
+      end
     elseif choice == "d" then
-      local id = kioskRead("Note id: ")
-      local deleted = kioskRequest(serverId, "kiosk_delete_note", { token = token, id = id })
+      local selected = noteBySelection(reply.notes, kioskRead("Note number or id: "))
+      local deleted = selected and kioskRequest(serverId, "kiosk_delete_note", { token = token, id = selected.id }) or { ok = false, error = "note not found" }
       print(deleted.ok and "Deleted." or ("Failed: " .. tostring(deleted.error)))
       pause()
     elseif choice == "b" then
@@ -2958,6 +3842,56 @@ local function kioskStatus(serverId, brand, token, user)
   return true
 end
 
+local function kioskSecurityActions(serverId, brand, token, user)
+  while true do
+    drawKioskHeader(brand, user)
+    print("Clearance: C" .. tostring(user.clearance or "?"))
+    print("1. Trigger emergency alarm")
+    print("2. Trigger security alarm")
+    print("3. Reset active alarm")
+    print("4. Lockdown")
+    print("5. Clear lockdown")
+    print("6. Unlock door")
+    print("7. Lock door")
+    print("B. Back")
+
+    local choice = string.lower(kioskRead("> "))
+    local payload = { token = token }
+
+    if choice == "1" then
+      payload.action = "emergency"
+      payload.reason = kioskRead("Reason: ")
+    elseif choice == "2" then
+      payload.action = "alarm"
+      payload.profile = "security"
+      payload.reason = kioskRead("Reason: ")
+    elseif choice == "3" then
+      payload.action = "reset_alarm"
+    elseif choice == "4" then
+      payload.action = "lockdown"
+    elseif choice == "5" then
+      payload.action = "unlockdown"
+    elseif choice == "6" then
+      payload.action = "unlock_door"
+      payload.door = kioskRead("Door id: ")
+      payload.seconds = tonumber(kioskRead("Seconds blank=default: "))
+    elseif choice == "7" then
+      payload.action = "lock_door"
+      payload.door = kioskRead("Door id: ")
+    elseif choice == "b" then
+      return true
+    else
+      payload = nil
+    end
+
+    if payload then
+      local reply = kioskRequest(serverId, "kiosk_security_action", payload)
+      print(reply.ok and "Done." or ("Denied/failed: " .. tostring(reply.error)))
+      pause()
+    end
+  end
+end
+
 local function kioskMenu(serverId, brand, token, user)
   while true do
     drawKioskHeader(brand, user)
@@ -2966,6 +3900,7 @@ local function kioskMenu(serverId, brand, token, user)
     print("3. Messages")
     print("4. Employee directory")
     print("5. Facility status")
+    print("6. Security actions")
     print("L. Log out")
     local choice = string.lower(kioskRead("> "))
 
@@ -2987,6 +3922,10 @@ local function kioskMenu(serverId, brand, token, user)
       end
     elseif choice == "5" then
       if not kioskStatus(serverId, brand, token, user) then
+        return "logout"
+      end
+    elseif choice == "6" then
+      if not kioskSecurityActions(serverId, brand, token, user) then
         return "logout"
       end
     elseif choice == "l" then
@@ -3040,7 +3979,7 @@ end
 
 local function eventLoop()
   scheduleTimer(config.pollSeconds or 1, { type = "poll" })
-  scheduleTimer(1, { type = "monitor" })
+  scheduleTimer((config.monitors and config.monitors.refreshSeconds) or 2, { type = "monitor" })
 
   while state.running do
     local event = { os.pullEventRaw() }
@@ -3062,8 +4001,8 @@ local function eventLoop()
           pollInputs()
           scheduleTimer(config.pollSeconds or 1, { type = "poll" })
         elseif payload.type == "monitor" then
-          drawMonitors(false)
-          scheduleTimer(1, { type = "monitor" })
+          drawMonitors(true)
+          scheduleTimer((config.monitors and config.monitors.refreshSeconds) or 2, { type = "monitor" })
         elseif payload.type == "alarm_pulse" then
           if state.alarm.active then
             playAlarmPulse()
@@ -3112,6 +4051,10 @@ local function eventLoop()
     elseif name == "overstressed" then
       raiseAlarm("Create kinetic network overstressed", nil, "create", "power_fault")
     elseif name == "stress_change" then
+      checkGlobalSensors()
+    elseif name == "redstone" then
+      checkDoorSensors()
+      checkEmergencyButtons()
       checkGlobalSensors()
     elseif name == "peripheral" or name == "peripheral_detach" then
       openRednet()
