@@ -55,6 +55,7 @@ return {
       postFeed = 1,
       sendMessage = 1,
       viewStatus = 1,
+      viewLogs = 2,
       triggerEmergency = 1,
       triggerAlarm = 2,
       resetAlarm = 3,
@@ -67,6 +68,36 @@ return {
       alex = { pin = "1234", displayName = "Alex", role = "employee", clearance = 1 },
       sam = { pin = "2222", displayName = "Sam Security", role = "security", clearance = 3 },
     },
+  },
+
+  logs = {
+    readLines = 80,
+    defaultClearance = 2,
+    clearances = {
+      ACCESS_GRANTED = 2,
+      ACCESS_DENIED = 3,
+      ALARM_RAISED = 2,
+      ALARM_ESCALATED = 2,
+      ALARM_RESET = 2,
+      DOOR_LOCK = 2,
+      EMPLOYEE_LOGIN = 3,
+      EMPLOYEE_LOGIN_DENIED = 3,
+      EMPLOYEE_ADD = 5,
+      EMPLOYEE_ROLE = 5,
+      EMPLOYEE_CLEARANCE = 5,
+      LOCKDOWN = 3,
+      LOCKDOWN_CLEAR = 3,
+      SENSOR_FAULT = 2,
+      SENSOR_CLEAR = 2,
+      SOCIAL_POST = 2,
+      SOCIAL_DM = 4,
+    },
+  },
+
+  kiosk = {
+    locked = true,
+    syncSeconds = 2,
+    alarmSoundSeconds = 1.5,
   },
 
   monitors = {

@@ -15,6 +15,12 @@ return {
     discoverySeconds = 3,
   },
 
+  kiosk = {
+    locked = true,
+    syncSeconds = 2,
+    alarmSoundSeconds = 1.5,
+  },
+
   branding = {
     facilityName = "North Ridge Facility",
     shortName = "NRF",

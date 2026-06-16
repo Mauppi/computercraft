@@ -41,6 +41,10 @@ Employees can sign in, edit personal notes, read/post to the facility feed, send
 
 `startup_auto_update.lua` fetches `security_system.lua` from `https://raw.githubusercontent.com/Mauppi/computercraft/master/security_system.lua`. Its default after-update behavior is `run` for server mode and `reboot` for kiosk mode. HTTP must be enabled in the CC:Tweaked server config.
 
+Locked kiosks do not expose a Quit option and disable normal Ctrl+T termination in kiosk mode. Set `kiosk.locked = false` only for development computers.
+
+Kiosks stay synced to the server alarm/lockdown state through rednet broadcasts and a periodic heartbeat. If a kiosk has a speaker attached, it mirrors active alarm sounds locally.
+
 ## Employee Notes And Clearance
 
 Kiosk notes now support full-note reading, editing by list number, and safe updates. A wrong note id no longer creates a duplicate note.
@@ -54,6 +58,8 @@ Employee clearance controls kiosk security actions:
 - C5 can manage employees from the server console.
 
 Change thresholds in `employees.permissions`.
+
+Facility logs are available from the kiosk menu. The server tags new log lines with a clearance marker such as `C2` or `C5`, and employees only receive log lines at or below their clearance. Configure this with `logs.clearances` and the `viewLogs` permission.
 
 ## Alarm Audio And Emergency Buttons
 

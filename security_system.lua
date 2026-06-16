@@ -67,6 +67,7 @@ local defaultConfig = {
       postFeed = 1,
       sendMessage = 1,
       viewStatus = 1,
+      viewLogs = 2,
       triggerEmergency = 1,
       triggerAlarm = 2,
       resetAlarm = 3,
@@ -77,6 +78,36 @@ local defaultConfig = {
     initialAccounts = {
       -- admin = { pin = "2468", displayName = "Facility Admin", role = "admin" },
     },
+  },
+
+  logs = {
+    readLines = 80,
+    defaultClearance = 2,
+    clearances = {
+      ACCESS_GRANTED = 2,
+      ACCESS_DENIED = 3,
+      ALARM_RAISED = 2,
+      ALARM_ESCALATED = 2,
+      ALARM_RESET = 2,
+      DOOR_LOCK = 2,
+      EMPLOYEE_LOGIN = 3,
+      EMPLOYEE_LOGIN_DENIED = 3,
+      EMPLOYEE_ADD = 5,
+      EMPLOYEE_ROLE = 5,
+      EMPLOYEE_CLEARANCE = 5,
+      LOCKDOWN = 3,
+      LOCKDOWN_CLEAR = 3,
+      SENSOR_FAULT = 2,
+      SENSOR_CLEAR = 2,
+      SOCIAL_POST = 2,
+      SOCIAL_DM = 4,
+    },
+  },
+
+  kiosk = {
+    locked = true,
+    syncSeconds = 2,
+    alarmSoundSeconds = 1.5,
   },
 
   monitors = {
@@ -267,6 +298,8 @@ local defaultConfig = {
 }
 
 local config
+local employeeClearance
+local openRednet
 local state = {
   running = true,
   doors = {},
@@ -282,6 +315,16 @@ local state = {
   social = {
     feed = {},
     messages = {},
+  },
+  kiosk = {
+    netLoop = false,
+    running = false,
+    serverId = nil,
+    inbox = {},
+    status = nil,
+    branding = nil,
+    lastSync = 0,
+    lastAlarmSound = 0,
   },
   sensorDetails = {},
   alarm = {
@@ -403,6 +446,12 @@ local function compact(value)
   return tostring(value)
 end
 
+local function auditClearance(action)
+  local logs = config and config.logs or {}
+  local clearances = logs.clearances or {}
+  return tonumber(clearances[action]) or tonumber(logs.defaultClearance) or 2
+end
+
 local function timestamp()
   if os.date then
     return os.date("%Y-%m-%d %H:%M:%S")
@@ -418,9 +467,43 @@ local function audit(action, detail)
 
   local ok, handle = pcall(fs.open, path, "a")
   if ok and handle then
-    handle.writeLine(timestamp() .. " " .. action .. " " .. compact(detail or ""))
+    local detailText = string.gsub(compact(detail or ""), "[\r\n]+", " ")
+    handle.writeLine(timestamp() .. " C" .. tostring(auditClearance(action)) .. " " .. action .. " " .. detailText)
     handle.close()
   end
+end
+
+local function readFacilityLogsFor(record, limit)
+  local path = config.logFile or LOG_FILE
+  if not fs.exists(path) then
+    return {}
+  end
+
+  local handle = fs.open(path, "r")
+  local lines = {}
+  while true do
+    local line = handle.readLine()
+    if not line then
+      break
+    end
+    table.insert(lines, line)
+  end
+  handle.close()
+
+  local clearance = employeeClearance and employeeClearance(record) or 0
+  local visible = {}
+  for index = #lines, 1, -1 do
+    local line = lines[index]
+    local required = tonumber(string.match(line, "%sC(%d+)%s")) or tonumber(config.logs and config.logs.defaultClearance) or 2
+    if required <= clearance then
+      table.insert(visible, line)
+      if #visible >= (tonumber(limit) or tonumber(config.logs and config.logs.readLines) or 80) then
+        break
+      end
+    end
+  end
+
+  return visible
 end
 
 local function writeDefaultConfig()
@@ -486,6 +569,26 @@ local function applyDefaults(userConfig)
   for key, value in pairs(defaultConfig.employees.permissions) do
     if merged.employees.permissions[key] == nil then
       merged.employees.permissions[key] = value
+    end
+  end
+
+  merged.logs = merged.logs or shallowCopy(defaultConfig.logs)
+  for key, value in pairs(defaultConfig.logs) do
+    if merged.logs[key] == nil then
+      merged.logs[key] = shallowCopy(value)
+    end
+  end
+  merged.logs.clearances = merged.logs.clearances or shallowCopy(defaultConfig.logs.clearances)
+  for key, value in pairs(defaultConfig.logs.clearances) do
+    if merged.logs.clearances[key] == nil then
+      merged.logs.clearances[key] = value
+    end
+  end
+
+  merged.kiosk = merged.kiosk or shallowCopy(defaultConfig.kiosk)
+  for key, value in pairs(defaultConfig.kiosk) do
+    if merged.kiosk[key] == nil then
+      merged.kiosk[key] = shallowCopy(value)
     end
   end
 
@@ -941,6 +1044,39 @@ local function setAlarmOutputs(active)
   setOutputList(profile.outputs, active)
 end
 
+local function alarmStatePayload()
+  local brand = displayBranding()
+  return {
+    op = "alarm_state",
+    branding = {
+      facilityName = brand.facilityName,
+      shortName = brand.shortName,
+      kioskTitle = brand.kioskTitle,
+      motto = brand.motto,
+      primaryColor = brand.primaryColor,
+      accentColor = brand.accentColor,
+      textColor = brand.textColor,
+    },
+    alarm = {
+      active = state.alarm.active,
+      reason = state.alarm.reason,
+      door = state.alarm.door,
+      actor = state.alarm.actor,
+      profile = state.alarm.profile,
+    },
+    lockdown = state.lockdown,
+  }
+end
+
+local function broadcastAlarmState()
+  if not (config and config.rednet and config.rednet.enabled and rednet) then
+    return
+  end
+
+  openRednet()
+  pcall(rednet.broadcast, alarmStatePayload(), config.rednet.protocol or PROTOCOL)
+end
+
 local function clampSample(value)
   value = math.floor(value)
   if value > 127 then
@@ -1056,6 +1192,7 @@ local function raiseAlarm(reason, doorId, actor, profileName)
       playAlarmPulse()
       local profile = alarmProfile("emergency")
       sendChat((profile.label or "EMERGENCY") .. ": " .. state.alarm.reason, "emergency")
+      broadcastAlarmState()
       audit("ALARM_ESCALATED", {
         reason = state.alarm.reason,
         door = doorId,
@@ -1072,6 +1209,7 @@ local function raiseAlarm(reason, doorId, actor, profileName)
       actor = actor,
       profile = profileName,
     })
+    broadcastAlarmState()
     return
   end
 
@@ -1088,6 +1226,7 @@ local function raiseAlarm(reason, doorId, actor, profileName)
   scheduleAlarmPulse()
   local profile = alarmProfile(profileName)
   sendChat((profile.label or "ALARM") .. ": " .. state.alarm.reason, profileName)
+  broadcastAlarmState()
   audit("ALARM_RAISED", {
     reason = state.alarm.reason,
     door = doorId,
@@ -1106,6 +1245,7 @@ local function resetAlarm(actor)
   state.alarm.profile = nil
   state.alarm.since = nil
   audit("ALARM_RESET", actor or "console")
+  broadcastAlarmState()
   markDirty()
 end
 
@@ -1985,7 +2125,7 @@ local function pollInputs()
   checkGlobalSensors()
 end
 
-local function openRednet()
+function openRednet()
   if not (config.rednet and config.rednet.enabled) or not rednet then
     return
   end
@@ -2082,8 +2222,6 @@ local function employeeRecord(username)
   ensureEmployeeTables()
   return state.accounts.users[normalizeUsername(username)]
 end
-
-local employeeClearance
 
 local function publicEmployee(record)
   if not record then
@@ -2500,6 +2638,15 @@ local function handleRednet(sender, message, protocol)
     else
       reply.error = err
     end
+  elseif message.op == "kiosk_logs" then
+    local record, err = requireEmployeePermission(message.token, "viewLogs")
+    if record then
+      reply.ok = true
+      reply.logs = readFacilityLogsFor(record, message.limit)
+      reply.clearance = employeeClearance(record)
+    else
+      reply.error = err
+    end
   elseif message.op == "kiosk_security_action" then
     local action = tostring(message.action or "")
     local permission = "triggerAlarm"
@@ -2532,11 +2679,13 @@ local function handleRednet(sender, message, protocol)
       end
       audit("LOCKDOWN", { actor = record.username, source = "kiosk" })
       markDirty()
+      broadcastAlarmState()
       reply.ok = true
     elseif action == "unlockdown" then
       state.lockdown = false
       audit("LOCKDOWN_CLEAR", { actor = record.username, source = "kiosk" })
       markDirty()
+      broadcastAlarmState()
       reply.ok = true
     elseif action == "unlock_door" then
       local doorId = tostring(message.door or "")
@@ -2612,6 +2761,7 @@ local function handleRednet(sender, message, protocol)
     reply.error = "unknown op"
   end
 
+  reply.requestId = message.requestId
   pcall(rednet.send, sender, reply, wantedProtocol)
 end
 
@@ -3406,6 +3556,7 @@ local function handleCommand(line)
       end
       audit("LOCKDOWN", "console")
       markDirty()
+      broadcastAlarmState()
       print("Lockdown enabled")
     end
   elseif command == "unlockdown" then
@@ -3413,6 +3564,7 @@ local function handleCommand(line)
       state.lockdown = false
       audit("LOCKDOWN_CLEAR", "console")
       markDirty()
+      broadcastAlarmState()
       print("Lockdown cleared")
     end
   elseif command == "allow" then
@@ -3468,7 +3620,7 @@ local function clearScreen()
 end
 
 local function drawKioskHeader(brand, user)
-  brand = brand or displayBranding()
+  brand = state.kiosk.branding or brand or displayBranding()
   if term.isColor and term.isColor() then
     term.setBackgroundColor(colorValue(brand.primaryColor, colors.blue))
     term.setTextColor(colorValue(brand.textColor, colors.white))
@@ -3482,6 +3634,15 @@ local function drawKioskHeader(brand, user)
   end
   if user then
     print("Signed in: " .. tostring(user.displayName or user.username))
+  end
+  if state.alarm.active then
+    local profile = alarmProfile(state.alarm.profile)
+    print("ALARM: " .. tostring(profile.label or "Alarm"))
+    if state.alarm.reason then
+      print(truncate(state.alarm.reason, 28))
+    end
+  elseif state.lockdown then
+    print("LOCKDOWN ACTIVE")
   end
   print(string.rep("-", 28))
 
@@ -3505,6 +3666,64 @@ local function pause()
   read()
 end
 
+local function kioskApplyAlarmMessage(message, sender)
+  if type(message) ~= "table" then
+    return
+  end
+
+  if message.branding then
+    state.kiosk.branding = message.branding
+  end
+  if message.status then
+    state.kiosk.status = message.status
+  end
+
+  local alarm = message.alarm or (message.status and message.status.alarm)
+  if alarm then
+    state.alarm.active = alarm.active and true or false
+    state.alarm.reason = alarm.reason
+    state.alarm.actor = alarm.actor
+    state.alarm.door = alarm.door
+    state.alarm.profile = alarm.profile
+    if not state.alarm.active then
+      state.alarm.soundIndex = 1
+    end
+  end
+
+  if message.lockdown ~= nil then
+    state.lockdown = message.lockdown and true or false
+  elseif message.status and message.status.lockdown ~= nil then
+    state.lockdown = message.status.lockdown and true or false
+  end
+
+  if sender then
+    state.kiosk.serverId = sender
+  end
+  state.kiosk.lastSync = os.clock()
+end
+
+local function kioskQueueMessage(sender, message)
+  table.insert(state.kiosk.inbox, {
+    sender = sender,
+    message = message,
+  })
+  while #state.kiosk.inbox > 50 do
+    table.remove(state.kiosk.inbox, 1)
+  end
+end
+
+local function kioskTakeReply(serverId, requestId)
+  for index, item in ipairs(state.kiosk.inbox) do
+    local message = item.message
+    if item.sender == serverId and type(message) == "table" and message.requestId == requestId then
+      table.remove(state.kiosk.inbox, index)
+      kioskApplyAlarmMessage(message, item.sender)
+      return message
+    end
+  end
+  return nil
+end
+
 local function kioskRequest(serverId, op, payload, timeout)
   if not rednet then
     return { ok = false, error = "rednet unavailable" }
@@ -3512,6 +3731,7 @@ local function kioskRequest(serverId, op, payload, timeout)
 
   payload = payload or {}
   payload.op = op
+  payload.requestId = payload.requestId or makeId("req")
   local protocol = (config.rednet and config.rednet.protocol) or PROTOCOL
   local okSend, sendErr = pcall(rednet.send, serverId, payload, protocol)
   if not okSend then
@@ -3519,13 +3739,28 @@ local function kioskRequest(serverId, op, payload, timeout)
   end
 
   local deadline = os.clock() + (timeout or 5)
+  if state.kiosk.netLoop then
+    while os.clock() < deadline do
+      local reply = kioskTakeReply(serverId, payload.requestId)
+      if reply then
+        return reply
+      end
+      sleep(0.05)
+    end
+
+    return { ok = false, error = "server timeout" }
+  end
+
   while os.clock() < deadline do
     local remaining = math.max(0.1, deadline - os.clock())
     local okReceive, sender, message = pcall(rednet.receive, protocol, remaining)
     if not okReceive then
       return { ok = false, error = sender }
     end
-    if sender == serverId and type(message) == "table" then
+    if type(message) == "table" and message.op == "alarm_state" then
+      kioskApplyAlarmMessage(message, sender)
+    elseif sender == serverId and type(message) == "table" and (message.requestId == payload.requestId or message.requestId == nil) then
+      kioskApplyAlarmMessage(message, sender)
       return message
     end
   end
@@ -3548,23 +3783,81 @@ local function discoverServer()
     end
   end
 
-  local okBroadcast = pcall(rednet.broadcast, { op = "kiosk_hello" }, protocol)
+  local requestId = makeId("discover")
+  local okBroadcast = pcall(rednet.broadcast, { op = "kiosk_hello", requestId = requestId }, protocol)
   if not okBroadcast then
     return nil, displayBranding(), nil
   end
   local timeout = (config.rednet and config.rednet.discoverySeconds) or 2
   local deadline = os.clock() + timeout
+  if state.kiosk.netLoop then
+    while os.clock() < deadline do
+      for index, item in ipairs(state.kiosk.inbox) do
+        local message = item.message
+        if type(message) == "table" and message.requestId == requestId and message.ok and message.branding then
+          table.remove(state.kiosk.inbox, index)
+          kioskApplyAlarmMessage(message, item.sender)
+          return item.sender, message.branding, message.status
+        end
+      end
+      sleep(0.05)
+    end
+
+    return nil, displayBranding(), nil
+  end
+
   while os.clock() < deadline do
     local okReceive, sender, message = pcall(rednet.receive, protocol, math.max(0.1, deadline - os.clock()))
     if not okReceive then
       return nil, displayBranding(), nil
     end
     if type(message) == "table" and message.ok and message.branding then
+      kioskApplyAlarmMessage(message, sender)
       return sender, message.branding, message.status
     end
   end
 
   return nil, displayBranding(), nil
+end
+
+local function kioskNetworkLoop()
+  openRednet()
+  local protocol = (config.rednet and config.rednet.protocol) or PROTOCOL
+
+  while state.kiosk.running do
+    if not rednet then
+      sleep(0.5)
+    else
+      local ok, sender, message = pcall(rednet.receive, protocol, 0.5)
+      if ok and type(message) == "table" then
+        if message.op == "alarm_state" then
+          kioskApplyAlarmMessage(message, sender)
+        else
+          kioskQueueMessage(sender, message)
+          if message.alarm or message.status then
+            kioskApplyAlarmMessage(message, sender)
+          end
+        end
+      elseif not ok then
+        sleep(0.5)
+      end
+    end
+  end
+end
+
+local function kioskAlarmSpeakerLoop()
+  while state.kiosk.running do
+    if state.alarm.active then
+      local interval = tonumber(config.kiosk and config.kiosk.alarmSoundSeconds) or alarmProfile(state.alarm.profile).repeatSeconds or 1.5
+      if os.clock() - (state.kiosk.lastAlarmSound or 0) >= interval then
+        playAlarmPulse()
+        state.kiosk.lastAlarmSound = os.clock()
+      end
+    else
+      state.kiosk.lastAlarmSound = 0
+    end
+    sleep(0.1)
+  end
 end
 
 local function kioskLogin(serverId, brand)
@@ -3575,7 +3868,9 @@ local function kioskLogin(serverId, brand)
       print("2. Create account")
     end
     print("R. Retry server")
-    print("Q. Quit")
+    if config.kiosk and config.kiosk.locked == false then
+      print("Q. Quit")
+    end
     local choice = string.lower(kioskRead("> "))
 
     if choice == "1" then
@@ -3600,7 +3895,7 @@ local function kioskLogin(serverId, brand)
       pause()
     elseif choice == "r" then
       return nil, nil, brand, "retry"
-    elseif choice == "q" then
+    elseif choice == "q" and config.kiosk and config.kiosk.locked == false then
       return nil, nil, brand, "quit"
     end
   end
@@ -3842,6 +4137,34 @@ local function kioskStatus(serverId, brand, token, user)
   return true
 end
 
+local function kioskLogs(serverId, brand, token, user)
+  drawKioskHeader(brand, user)
+  local reply = kioskRequest(serverId, "kiosk_logs", { token = token, limit = 80 })
+  if not reply.ok then
+    print("Logs unavailable: " .. tostring(reply.error))
+    pause()
+    return false
+  end
+
+  local lines = {
+    "Facility Logs",
+    "Clearance: C" .. tostring(reply.clearance or user.clearance or "?"),
+    "",
+  }
+
+  for _, line in ipairs(reply.logs or {}) do
+    table.insert(lines, line)
+  end
+
+  if #(reply.logs or {}) == 0 then
+    table.insert(lines, "No visible log entries.")
+  end
+
+  printPaged(lines)
+  pause()
+  return true
+end
+
 local function kioskSecurityActions(serverId, brand, token, user)
   while true do
     drawKioskHeader(brand, user)
@@ -3901,6 +4224,7 @@ local function kioskMenu(serverId, brand, token, user)
     print("4. Employee directory")
     print("5. Facility status")
     print("6. Security actions")
+    print("7. Facility logs")
     print("L. Log out")
     local choice = string.lower(kioskRead("> "))
 
@@ -3928,6 +4252,10 @@ local function kioskMenu(serverId, brand, token, user)
       if not kioskSecurityActions(serverId, brand, token, user) then
         return "logout"
       end
+    elseif choice == "7" then
+      if not kioskLogs(serverId, brand, token, user) then
+        return "logout"
+      end
     elseif choice == "l" then
       kioskRequest(serverId, "kiosk_logout", { token = token }, 2)
       return "logout"
@@ -3935,10 +4263,7 @@ local function kioskMenu(serverId, brand, token, user)
   end
 end
 
-local function kioskMain()
-  config = loadConfig()
-  config.mode = "kiosk"
-
+local function kioskUiLoop()
   while true do
     local serverId, brand = discoverServer()
     if not serverId then
@@ -3949,12 +4274,32 @@ local function kioskMain()
     else
       local token, user, nextBrand, action = kioskLogin(serverId, brand)
       brand = nextBrand or brand
-      if action == "quit" then
+      if action == "quit" and config.kiosk and config.kiosk.locked == false then
         return
       elseif action ~= "retry" and token and user then
         kioskMenu(serverId, brand, token, user)
       end
     end
+  end
+end
+
+local function kioskMain()
+  config = loadConfig()
+  config.mode = "kiosk"
+  if not (config.kiosk and config.kiosk.locked == false) then
+    os.pullEvent = os.pullEventRaw
+  end
+  state.kiosk.running = true
+  state.kiosk.netLoop = true
+  openRednet()
+
+  local ok, err = pcall(function()
+    parallel.waitForAny(kioskUiLoop, kioskNetworkLoop, kioskAlarmSpeakerLoop)
+  end)
+
+  state.kiosk.running = false
+  if not ok then
+    error(err)
   end
 end
 
@@ -3980,6 +4325,7 @@ end
 local function eventLoop()
   scheduleTimer(config.pollSeconds or 1, { type = "poll" })
   scheduleTimer((config.monitors and config.monitors.refreshSeconds) or 2, { type = "monitor" })
+  scheduleTimer(tonumber(config.kiosk and config.kiosk.syncSeconds) or 2, { type = "alarm_broadcast" })
 
   while state.running do
     local event = { os.pullEventRaw() }
@@ -4003,6 +4349,9 @@ local function eventLoop()
         elseif payload.type == "monitor" then
           drawMonitors(true)
           scheduleTimer((config.monitors and config.monitors.refreshSeconds) or 2, { type = "monitor" })
+        elseif payload.type == "alarm_broadcast" then
+          broadcastAlarmState()
+          scheduleTimer(tonumber(config.kiosk and config.kiosk.syncSeconds) or 2, { type = "alarm_broadcast" })
         elseif payload.type == "alarm_pulse" then
           if state.alarm.active then
             playAlarmPulse()
