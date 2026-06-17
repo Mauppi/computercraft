@@ -85,6 +85,7 @@ return {
         "security_system_announcements",
         "DEFAULT_CONFIG_URL",
         "installRemoteConfigIfMissing",
+        "installKioskConfigIfMissing",
         "function controllerMain()",
         "kiosk_setup",
         "kiosk_badge_login",

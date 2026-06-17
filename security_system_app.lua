@@ -10,6 +10,7 @@ local DEFAULT_CONFIG_URL = "https://raw.githubusercontent.com/Mauppi/computercra
 local LOG_FILE = "security_audit.log"
 local ACCOUNTS_FILE = "security_accounts.lua"
 local SOCIAL_FILE = "security_social.lua"
+local KIOSK_CONFIG_EXAMPLE = "security_kiosk_config.example.lua"
 local KIOSK_EXIT_FILE = ".security_kiosk_exit"
 local PROTOCOL = "cc_security_v1"
 local args = {}
@@ -324,6 +325,53 @@ function installRemoteConfigIfMissing()
   return true
 end
 
+function appInstallPath(path)
+  local root = (_G and (_G.SECURITY_SYSTEM_INSTALL_ROOT or _G.SECURITY_SYSTEM_ASSET_ROOT)) or ""
+  root = tostring(root or "")
+  path = tostring(path or "")
+  if root == "" then
+    return path
+  end
+  if fs and fs.combine then
+    return fs.combine(root, path)
+  end
+  return root .. "/" .. path
+end
+
+function installKioskConfigIfMissing()
+  if fs.exists(CONFIG_FILE) then
+    return true
+  end
+
+  local source = KIOSK_CONFIG_EXAMPLE
+  if not fs.exists(source) then
+    source = appInstallPath(KIOSK_CONFIG_EXAMPLE)
+  end
+  if fs.exists(source) then
+    local ok, err = pcall(fs.copy, source, CONFIG_FILE)
+    if ok then
+      return true
+    end
+    return false, err or "copy failed"
+  end
+
+  local handle = fs.open(CONFIG_FILE, "w")
+  if not handle then
+    return false, "could not write " .. CONFIG_FILE
+  end
+  handle.writeLine("return {")
+  handle.writeLine("  mode = \"kiosk\",")
+  handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },")
+  handle.writeLine("  configSync = { enabled = true, includeAlarm = true },")
+  handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },")
+  handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = true, volume = 1, sampleRate = 48000, maxSamples = 128000, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
+  handle.writeLine("}")
+  handle.close()
+  return true
+end
+
 function applyDefaults(userConfig)
   local merged = userConfig or {}
   for key, value in pairs(defaultConfig) do
@@ -492,11 +540,17 @@ function applyDefaults(userConfig)
   return merged
 end
 
-function loadConfig()
+function loadConfig(requestedMode)
   if not fs.exists(CONFIG_FILE) then
-    local installed, installErr = installRemoteConfigIfMissing()
+    local installed
+    local installErr
+    if requestedMode == "kiosk" then
+      installed, installErr = installKioskConfigIfMissing()
+    else
+      installed, installErr = installRemoteConfigIfMissing()
+    end
     if not installed then
-      error("Missing " .. CONFIG_FILE .. "; could not fetch " .. DEFAULT_CONFIG_URL .. ": " .. tostring(installErr))
+      error("Missing " .. CONFIG_FILE .. ": " .. tostring(installErr))
     end
   end
 
@@ -6980,7 +7034,7 @@ function kioskMaintenanceLoop()
 end
 
 function kioskMain()
-  config = loadConfig()
+  config = loadConfig("kiosk")
   config.mode = "kiosk"
   math.randomseed(nowMillis() % 2147483647)
   if fs.exists(KIOSK_EXIT_FILE) then
@@ -7011,7 +7065,7 @@ function kioskMain()
 end
 
 function controllerMain()
-  config = loadConfig()
+  config = loadConfig("controller")
   config.mode = "controller"
   math.randomseed(nowMillis() % 2147483647)
   openRednet()
@@ -7203,7 +7257,7 @@ function main()
     return
   end
 
-  config = loadConfig()
+  config = loadConfig(requestedMode)
   if requestedMode and requestedMode ~= "" then
     config.mode = requestedMode
   end

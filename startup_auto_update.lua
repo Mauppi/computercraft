@@ -16,10 +16,11 @@ local INSTALL_SUBDIR = "security_system"
 local MIN_DISK_INSTALL_FREE = 384000
 local INSTALL_ROOT = ""
 local INSTALL_DESCRIPTION = "computer storage"
+local startupArgs = { ... }
 
 -- Set this to "server" or "kiosk" to force a mode. Leave nil to read
 -- security_config.lua, falling back to server mode.
-local MODE_OVERRIDE = nil
+local MODE_OVERRIDE = startupArgs[1] and string.lower(tostring(startupArgs[1])) or nil
 
 -- After a successful update:
 --   "run"      starts the security program immediately.
@@ -72,7 +73,7 @@ local FALLBACK_MANIFEST = {
       path = APP_MODULE_FILE,
       required = true,
       minSize = 2000,
-      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "DEFAULT_CONFIG_URL", "installRemoteConfigIfMissing", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "includeAlarm", "function main()", "return {" },
+      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "DEFAULT_CONFIG_URL", "installRemoteConfigIfMissing", "installKioskConfigIfMissing", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "includeAlarm", "function main()", "return {" },
     },
     {
       path = PROGRAM,
@@ -980,15 +981,7 @@ local function runProgram(mode)
   configurePackagePath()
   _G.SECURITY_SYSTEM_INSTALL_ROOT = INSTALL_ROOT
   _G.SECURITY_SYSTEM_ASSET_ROOT = INSTALL_ROOT
-  local programPath = PROGRAM
-  local oldDir = shell.dir and shell.dir() or nil
-  if INSTALL_ROOT ~= "" then
-    if shell.setDir then
-      shell.setDir(INSTALL_ROOT)
-    else
-      programPath = installPath(PROGRAM)
-    end
-  end
+  local programPath = installPath(PROGRAM)
 
   if mode == "kiosk" then
     shell.run(programPath, "kiosk")
@@ -996,10 +989,6 @@ local function runProgram(mode)
     shell.run(programPath, "controller")
   else
     shell.run(programPath)
-  end
-
-  if oldDir and shell.setDir then
-    shell.setDir(oldDir)
   end
 end
 
