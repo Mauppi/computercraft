@@ -193,7 +193,7 @@ return {
     maxCharacters = 96,
     auto = {
       enabled = true,
-      intervalSeconds = 900,
+      intervalSeconds = 30,
     },
     lines = {
       "Remember: report hazards before hazards report you.",
