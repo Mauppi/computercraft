@@ -26,12 +26,49 @@ return {
     syncSeconds = 2,
     alarmSoundSeconds = 1.5,
     quitClearance = 5,
+    autoLogoutSeconds = 600,
+    autoRebootLoggedOutSeconds = 1800,
   },
 
   notifications = {
     enabled = true,
     maxItems = 12,
     sound = true,
+  },
+
+  announcements = {
+    enabled = true,
+    sound = true,
+    voice = true,
+    volume = 1,
+    sampleRate = 48000,
+    maxSamples = 128000,
+    syncAssets = true,
+    assetsRequired = false,
+    -- assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
+    voiceLines = {
+      -- badge_notice = { wav = "announcements/badge_notice.wav" },
+      -- lockdown = { files = { "announcements/lockdown_1.wav", "announcements/lockdown_2.wav" } },
+    },
+    jingles = {
+      announcement = {
+        -- wav = "announcements/jingle.wav",
+        tones = {
+          { freq = 523, seconds = 0.09 },
+          { freq = 659, seconds = 0.09 },
+          { freq = 784, seconds = 0.12 },
+        },
+      },
+      alarm = {
+        -- wav = "announcements/alarm_jingle.wav",
+        tones = {
+          { freq = 92, seconds = 0.17 },
+          { silence = 0.035 },
+          { freq = 74, seconds = 0.20 },
+          { freq = 63, seconds = 0.24 },
+        },
+      },
+    },
   },
 
   branding = {

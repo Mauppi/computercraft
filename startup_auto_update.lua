@@ -9,6 +9,7 @@ local APP_MODULE_FILE = "security_system_app.lua"
 local DEFAULTS_MODULE_FILE = "security_system_defaults.lua"
 local REDNET_MODULE_FILE = "security_system_rednet.lua"
 local NOTIFICATIONS_MODULE_FILE = "security_system_notifications.lua"
+local ANNOUNCEMENTS_MODULE_FILE = "security_system_announcements.lua"
 local CONFIG_FILE = "security_config.lua"
 local KIOSK_CONFIG_EXAMPLE = "security_kiosk_config.example.lua"
 
@@ -24,6 +25,8 @@ local MODE_OVERRIDE = nil
 local AFTER_UPDATE = {
   server = "run",
   kiosk = "reboot",
+  controller = "reboot",
+  door = "reboot",
 }
 
 local FALLBACK_MANIFEST = {
@@ -49,10 +52,16 @@ local FALLBACK_MANIFEST = {
       contains = { "Kiosk notification", "function M.push", "function M.playSound" },
     },
     {
+      path = ANNOUNCEMENTS_MODULE_FILE,
+      required = true,
+      minSize = 1000,
+      contains = { "Facility announcement audio", "function M.loadWav", "function M.buildAnnouncementBuffer", "function M.play" },
+    },
+    {
       path = APP_MODULE_FILE,
       required = true,
       minSize = 2000,
-      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "function main()", "return {" },
+      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "function controllerMain()", "kiosk_setup", "function main()", "return {" },
     },
     {
       path = PROGRAM,
@@ -67,6 +76,7 @@ local FALLBACK_MANIFEST = {
       contains = APP_MODULE_FILE,
     },
   },
+  assets = {},
 }
 
 local function clear()
@@ -96,6 +106,23 @@ local function readConfigMode()
   return "server"
 end
 
+local function loadConfigTable()
+  if not fs.exists(CONFIG_FILE) then
+    return {}
+  end
+
+  local fn = loadfile(CONFIG_FILE)
+  if not fn then
+    return {}
+  end
+
+  local ok, value = pcall(fn)
+  if ok and type(value) == "table" then
+    return value
+  end
+  return {}
+end
+
 local function copyKioskConfigIfMissing(mode)
   if mode ~= "kiosk" or fs.exists(CONFIG_FILE) then
     return
@@ -110,19 +137,52 @@ local function copyKioskConfigIfMissing(mode)
   handle.writeLine("return {")
   handle.writeLine("  mode = \"kiosk\",")
   handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },")
-  handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5 },")
+  handle.writeLine("  configSync = { enabled = true },")
+  handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800 },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = true, volume = 1, sampleRate = 48000, maxSamples = 128000, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
 end
 
-local function readFile(path)
+local function isWavPath(path)
+  return string.sub(string.lower(tostring(path or "")), -4) == ".wav"
+end
+
+local function isBinaryFile(file)
+  if type(file) == "table" then
+    if file.binary == true or file.kind == "wav" or file.wav == true then
+      return true
+    end
+    return isWavPath(file.path)
+  end
+  return isWavPath(file)
+end
+
+local function openFile(path, mode, fallbackMode)
+  local ok, handle = pcall(fs.open, path, mode)
+  if ok and handle then
+    return handle
+  end
+  if fallbackMode then
+    ok, handle = pcall(fs.open, path, fallbackMode)
+    if ok and handle then
+      return handle
+    end
+  end
+  return nil
+end
+
+local function readFile(path, binary)
   if not fs.exists(path) then
     return nil
   end
 
-  local handle = fs.open(path, "r")
+  local handle = openFile(path, binary and "rb" or "r", binary and "r" or nil)
+  if not handle then
+    return nil
+  end
   local data = handle.readAll()
   handle.close()
   return data
@@ -135,11 +195,15 @@ local function ensureParentDir(path)
   end
 end
 
-local function writeFile(path, data)
+local function writeFile(path, data, binary)
   ensureParentDir(path)
-  local handle = fs.open(path, "w")
+  local handle = openFile(path, binary and "wb" or "w", binary and "w" or nil)
+  if not handle then
+    return false
+  end
   handle.write(data)
   handle.close()
+  return true
 end
 
 local function loadReturnedTable(source, label)
@@ -164,7 +228,7 @@ local function loadReturnedTable(source, label)
   return value
 end
 
-local function fetchUrl(url)
+local function fetchUrl(url, binary)
   if not http or not http.get then
     return nil, "HTTP API is disabled"
   end
@@ -173,10 +237,19 @@ local function fetchUrl(url)
     url = url,
     redirect = true,
     timeout = 10,
+    binary = binary and true or false,
   })
 
   if not response then
     return nil, err or "request failed"
+  end
+
+  if response.getResponseCode then
+    local code = response.getResponseCode()
+    if code and code >= 400 then
+      response.close()
+      return nil, "HTTP " .. tostring(code)
+    end
   end
 
   local body = response.readAll()
@@ -198,6 +271,38 @@ local function fileUrl(baseUrl, path)
     path = string.sub(path, 2)
   end
   return normalizeBaseUrl(baseUrl) .. path
+end
+
+local function appendManifestEntries(out, entries, optionalDefault)
+  if type(entries) ~= "table" then
+    return
+  end
+
+  for _, entry in ipairs(entries) do
+    if type(entry) == "string" then
+      table.insert(out, { path = entry, required = false, binary = isWavPath(entry) })
+    elseif type(entry) == "table" then
+      if optionalDefault and entry.required == nil then
+        local copy = {}
+        for key, value in pairs(entry) do
+          copy[key] = value
+        end
+        copy.required = false
+        table.insert(out, copy)
+      else
+        table.insert(out, entry)
+      end
+    end
+  end
+end
+
+local function manifestEntries(manifest)
+  local out = {}
+  appendManifestEntries(out, manifest.files, false)
+  appendManifestEntries(out, manifest.assets, true)
+  appendManifestEntries(out, manifest.audioFiles, true)
+  appendManifestEntries(out, manifest.wavs, true)
+  return out
 end
 
 local function containsAll(data, contains)
@@ -230,6 +335,12 @@ local function validateFile(file, body)
     return false, "download was too small"
   end
 
+  if isWavPath(file.path) or file.kind == "wav" or file.wav == true then
+    if #body < 44 or string.sub(body, 1, 4) ~= "RIFF" or string.sub(body, 9, 12) ~= "WAVE" then
+      return false, "download was not a PCM WAV file"
+    end
+  end
+
   if not containsAll(body, file.contains) then
     return false, "download failed content checks"
   end
@@ -247,6 +358,95 @@ local function backupFile(path)
     fs.delete(backup)
   end
   fs.copy(path, backup)
+end
+
+local function openRednetModems()
+  if not rednet or not peripheral then
+    return false
+  end
+
+  for _, name in ipairs(peripheral.getNames()) do
+    local types = { peripheral.getType(name) }
+    for _, kind in ipairs(types) do
+      if kind == "modem" then
+        local isOpen = false
+        if rednet.isOpen then
+          local ok, value = pcall(rednet.isOpen, name)
+          isOpen = ok and value
+        end
+        if not isOpen then
+          pcall(rednet.open, name)
+        end
+      end
+    end
+  end
+  return true
+end
+
+local function makeRequestId(prefix)
+  local epoch = os.epoch and os.epoch("utc") or math.floor(os.clock() * 100000)
+  return tostring(prefix or "req") .. "_" .. tostring(epoch) .. "_" .. tostring(math.random(100000, 999999))
+end
+
+local function syncConfigFromSecurityServer(mode)
+  if mode ~= "kiosk" then
+    return true, "not kiosk mode", false
+  end
+  if not rednet then
+    return true, "rednet unavailable; skipped config sync", false
+  end
+  if not fs.exists(REDNET_MODULE_FILE) then
+    return true, "rednet module unavailable; skipped config sync", false
+  end
+
+  local current = loadConfigTable()
+  if current.configSync and current.configSync.enabled == false then
+    return true, "config sync disabled locally", false
+  end
+
+  local okModule, secure = pcall(require, "security_system_rednet")
+  if not okModule then
+    return true, "rednet module failed; skipped config sync", false
+  end
+
+  if not openRednetModems() then
+    return true, "no rednet modem; skipped config sync", false
+  end
+
+  local rednetConfig = current.rednet or {}
+  local protocol = rednetConfig.protocol or "cc_security_v1"
+  local requestId = makeRequestId("config")
+  local request = { op = "kiosk_config", requestId = requestId }
+  local wrapped = secure.wrap(request, rednetConfig)
+  local serverId = rednetConfig.serverId
+
+  if serverId then
+    pcall(rednet.send, serverId, wrapped, protocol)
+  else
+    pcall(rednet.broadcast, wrapped, protocol)
+  end
+
+  local timeout = tonumber(rednetConfig.discoverySeconds) or 3
+  local deadline = os.clock() + timeout
+  while os.clock() < deadline do
+    local okReceive, sender, message = pcall(rednet.receive, protocol, math.max(0.1, deadline - os.clock()))
+    if okReceive and sender then
+      local decoded = secure.unwrap(message, rednetConfig)
+      if type(decoded) == "table" and decoded.requestId == requestId and decoded.ok and type(decoded.config) == "table" then
+        decoded.config.mode = "kiosk"
+        local oldText = readFile(CONFIG_FILE)
+        local newText = "-- Synced from security server by startup_auto_update.lua.\nreturn " .. textutils.serialize(decoded.config) .. "\n"
+        if oldText == newText then
+          return true, "config already current from server " .. tostring(sender), false
+        end
+        backupFile(CONFIG_FILE)
+        writeFile(CONFIG_FILE, newText)
+        return true, "config synced from server " .. tostring(sender), true
+      end
+    end
+  end
+
+  return true, "no server config response", false
 end
 
 local function loadLocalManifest()
@@ -281,7 +481,8 @@ local function updateOneFile(baseUrl, file)
     return false, "manifest entry missing path", false
   end
 
-  local body, err = fetchUrl(file.url or fileUrl(baseUrl, path))
+  local binary = isBinaryFile(file)
+  local body, err = fetchUrl(file.url or fileUrl(baseUrl, path), binary)
   if not body then
     return false, err or "download failed", false
   end
@@ -291,13 +492,15 @@ local function updateOneFile(baseUrl, file)
     return false, validErr, false
   end
 
-  local current = readFile(path)
+  local current = readFile(path, binary)
   if current == body then
     return true, "current", false
   end
 
   backupFile(path)
-  writeFile(path, body)
+  if not writeFile(path, body, binary) then
+    return false, "write failed", false
+  end
   return true, "updated", true
 end
 
@@ -307,7 +510,7 @@ local function fetchUpdate()
   end
 
   local manifest, manifestSource = fetchManifest()
-  local files = manifest.files or {}
+  local files = manifestEntries(manifest)
   local baseUrl = manifest.baseUrl or DEFAULT_BASE_URL
   local updated = false
   local updatedCount = 0
@@ -338,6 +541,88 @@ local function fetchUpdate()
   return true, manifestSource .. ", already current", false
 end
 
+local function addWavPath(paths, seen, value)
+  value = string.gsub(tostring(value or ""), "\\", "/")
+  if not isWavPath(value) or seen[value] then
+    return
+  end
+  seen[value] = true
+  table.insert(paths, value)
+end
+
+local function collectWavPaths(value, paths, seen, key)
+  if type(value) == "string" then
+    if key == "wav" or key == "file" or key == "path" or isWavPath(value) then
+      addWavPath(paths, seen, value)
+    end
+    return
+  end
+
+  if type(value) ~= "table" then
+    return
+  end
+
+  for childKey, childValue in pairs(value) do
+    if childKey ~= "pcm" and childKey ~= "tones" then
+      collectWavPaths(childValue, paths, seen, tostring(childKey))
+    end
+  end
+end
+
+local function configuredWavFiles(configTable)
+  local paths = {}
+  collectWavPaths(configTable and configTable.announcements, paths, {})
+  return paths
+end
+
+local function fetchConfiguredWavs()
+  local current = loadConfigTable()
+  local announcements = current.announcements or {}
+  if announcements.syncAssets == false then
+    return true, "configured wav sync disabled", false
+  end
+
+  local wavs = configuredWavFiles(current)
+  if #wavs == 0 then
+    return true, "no configured wav assets", false
+  end
+
+  local manifest = fetchManifest()
+  local baseUrl = announcements.assetBaseUrl or (manifest and manifest.baseUrl) or DEFAULT_BASE_URL
+  local required = announcements.assetsRequired == true
+  local updated = false
+  local updatedCount = 0
+  local skipped = 0
+
+  for _, path in ipairs(wavs) do
+    local ok, message, changed = updateOneFile(baseUrl, {
+      path = path,
+      required = required,
+      binary = true,
+      kind = "wav",
+      minSize = 44,
+    })
+    if ok then
+      if changed then
+        updated = true
+        updatedCount = updatedCount + 1
+      end
+    elseif required then
+      return false, tostring(path) .. ": " .. tostring(message), updated
+    else
+      skipped = skipped + 1
+    end
+  end
+
+  if updated then
+    return true, "updated " .. tostring(updatedCount) .. " wav asset(s)", true
+  end
+  if skipped > 0 then
+    return true, "wav assets current; skipped " .. tostring(skipped), false
+  end
+  return true, "wav assets current", false
+end
+
 local function missingProgramFile()
   if not fs.exists(PROGRAM) then
     return PROGRAM
@@ -354,6 +639,9 @@ local function missingProgramFile()
   if not fs.exists(NOTIFICATIONS_MODULE_FILE) then
     return NOTIFICATIONS_MODULE_FILE
   end
+  if not fs.exists(ANNOUNCEMENTS_MODULE_FILE) then
+    return ANNOUNCEMENTS_MODULE_FILE
+  end
   return nil
 end
 
@@ -367,12 +655,15 @@ local function runProgram(mode)
 
   if mode == "kiosk" then
     shell.run(PROGRAM, "kiosk")
+  elseif mode == "controller" or mode == "door" or mode == "door_controller" then
+    shell.run(PROGRAM, "controller")
   else
     shell.run(PROGRAM)
   end
 end
 
 local function main()
+  math.randomseed((os.epoch and os.epoch("utc") or math.floor(os.clock() * 100000)) % 2147483647)
   local mode = readConfigMode()
   copyKioskConfigIfMissing(mode)
 
@@ -383,6 +674,14 @@ local function main()
 
   local ok, message, updated = fetchUpdate()
   print((ok and "Update: " or "Update failed: ") .. tostring(message))
+
+  local configOk, configMessage, configUpdated = syncConfigFromSecurityServer(mode)
+  print((configOk and "Config: " or "Config sync failed: ") .. tostring(configMessage))
+  updated = updated or configUpdated
+
+  local audioOk, audioMessage, audioUpdated = fetchConfiguredWavs()
+  print((audioOk and "Audio: " or "Audio sync failed: ") .. tostring(audioMessage))
+  updated = updated or audioUpdated
 
   if updated then
     local action = AFTER_UPDATE[mode] or "run"

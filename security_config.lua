@@ -4,13 +4,13 @@
 
 return {
   mode = "server",
-  siteName = "Base Security",
-  facilityName = "North Ridge Facility",
+  siteName = "Silo HQ",
+  facilityName = "F-Aperture",
   branding = {
-    facilityName = "North Ridge Facility",
-    shortName = "NRF",
-    kioskTitle = "Employee Kiosk",
-    motto = "Check in. Stay informed. Report faults.",
+    facilityName = "F-Aperture",
+    shortName = "FAP",
+    kioskTitle = "fapOS",
+    motto = "We are not evil. Trust us.",
     primaryColor = "blue",
     accentColor = "lime",
     textColor = "white",
@@ -33,10 +33,17 @@ return {
     discoverySeconds = 2,
     encryption = {
       -- Set enabled = true and use the same key on every server/kiosk.
-      enabled = false,
-      key = "change-this-facility-key",
+      enabled = true,
+      key = "FAPKEY",
       allowPlaintext = false,
     },
+  },
+
+  configSync = {
+    enabled = true,
+    allowKioskPull = true,
+    includeMonitors = true,
+    includeAnnouncements = true,
   },
 
   employees = {
@@ -86,6 +93,7 @@ return {
       ALARM_RAISED = 2,
       ALARM_ESCALATED = 2,
       ALARM_RESET = 2,
+      ANNOUNCEMENT = 1,
       DOOR_LOCK = 2,
       EMPLOYEE_LOGIN = 3,
       EMPLOYEE_LOGIN_DENIED = 3,
@@ -107,12 +115,54 @@ return {
     syncSeconds = 2,
     alarmSoundSeconds = 1.5,
     quitClearance = 5,
+    autoLogoutSeconds = 600,
+    autoRebootLoggedOutSeconds = 1800,
   },
 
   notifications = {
     enabled = true,
     maxItems = 12,
     sound = true,
+  },
+
+  announcements = {
+    enabled = true,
+    sound = true,
+    voice = true,
+    volume = 1,
+    sampleRate = 48000,
+    maxSamples = 128000,
+    auto = {
+      enabled = true,
+      intervalSeconds = 900,
+    },
+    lines = {
+      "Remember: report hazards before hazards report you.",
+      { text = "Facility notice: keep badges visible in restricted areas.", voiceLine = "badge_notice" },
+    },
+    voiceLines = {
+      -- badge_notice = { wav = "announcements/badge_notice.wav" },
+      -- lockdown = { files = { "announcements/lockdown_1.wav", "announcements/lockdown_2.wav" } },
+    },
+    jingles = {
+      announcement = {
+        -- wav = "announcements/jingle.wav",
+        tones = {
+          { freq = 523, seconds = 0.09 },
+          { freq = 659, seconds = 0.09 },
+          { freq = 784, seconds = 0.12 },
+        },
+      },
+      alarm = {
+        -- wav = "announcements/alarm_jingle.wav",
+        tones = {
+          { freq = 92, seconds = 0.17 },
+          { silence = 0.035 },
+          { freq = 74, seconds = 0.20 },
+          { freq = 63, seconds = 0.24 },
+        },
+      },
+    },
   },
 
   monitors = {

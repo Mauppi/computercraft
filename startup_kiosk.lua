@@ -8,6 +8,7 @@ local SECURITY_APP_MODULE = "security_system_app.lua"
 local SECURITY_DEFAULTS_MODULE = "security_system_defaults.lua"
 local SECURITY_REDNET_MODULE = "security_system_rednet.lua"
 local SECURITY_NOTIFICATIONS_MODULE = "security_system_notifications.lua"
+local SECURITY_ANNOUNCEMENTS_MODULE = "security_system_announcements.lua"
 local KIOSK_EXIT_FILE = ".security_kiosk_exit"
 local RESTART_SECONDS = 3
 
@@ -30,8 +31,10 @@ local function copyKioskConfigIfMissing()
   handle.writeLine("return {")
   handle.writeLine("  mode = \"kiosk\",")
   handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },")
-  handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5 },")
+  handle.writeLine("  configSync = { enabled = true },")
+  handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800 },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = true, volume = 1 },")
   handle.writeLine("  branding = {")
   handle.writeLine("    facilityName = \"Facility\",")
   handle.writeLine("    shortName = \"SEC\",")
@@ -60,6 +63,9 @@ local function missingProgramFile()
   end
   if not fs.exists(SECURITY_NOTIFICATIONS_MODULE) then
     return SECURITY_NOTIFICATIONS_MODULE
+  end
+  if not fs.exists(SECURITY_ANNOUNCEMENTS_MODULE) then
+    return SECURITY_ANNOUNCEMENTS_MODULE
   end
   return nil
 end

@@ -41,6 +41,13 @@ return {
     },
   },
 
+  configSync = {
+    enabled = true,
+    allowKioskPull = true,
+    includeMonitors = true,
+    includeAnnouncements = true,
+  },
+
   employees = {
     enabled = true,
     allowSelfRegistration = false,
@@ -69,6 +76,7 @@ return {
       resetAlarm = 3,
       operateDoors = 3,
       lockdown = 4,
+      setupFacility = 5,
       manageEmployees = 5,
       quitKiosk = 5,
     },
@@ -86,6 +94,7 @@ return {
       ALARM_RAISED = 2,
       ALARM_ESCALATED = 2,
       ALARM_RESET = 2,
+      ANNOUNCEMENT = 1,
       DOOR_LOCK = 2,
       EMPLOYEE_LOGIN = 3,
       EMPLOYEE_LOGIN_DENIED = 3,
@@ -93,6 +102,8 @@ return {
       EMPLOYEE_ROLE = 5,
       EMPLOYEE_CLEARANCE = 5,
       KIOSK_QUIT = 5,
+      SETUP_CHANGE = 5,
+      SETUP_DENIED = 5,
       LOCKDOWN = 3,
       LOCKDOWN_CLEAR = 3,
       SENSOR_FAULT = 2,
@@ -107,6 +118,8 @@ return {
     syncSeconds = 2,
     alarmSoundSeconds = 1.5,
     quitClearance = 5,
+    autoLogoutSeconds = 600,
+    autoRebootLoggedOutSeconds = 1800,
   },
 
   notifications = {
@@ -139,6 +152,67 @@ return {
       lockdown_clear = {
         { name = "minecraft:block.note_block.chime", volume = 1.2, pitch = 1.4 },
       },
+      announcement = {
+        { name = "minecraft:block.note_block.chime", volume = 1.4, pitch = 0.9 },
+      },
+    },
+  },
+
+  announcements = {
+    enabled = true,
+    sound = true,
+    voice = true,
+    volume = 1,
+    sampleRate = 48000,
+    maxSamples = 128000,
+    syncAssets = true,
+    assetsRequired = false,
+    -- assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
+    characterSeconds = 0.055,
+    spaceSeconds = 0.075,
+    maxCharacters = 96,
+    auto = {
+      enabled = false,
+      intervalSeconds = 900,
+    },
+    lines = {
+      "Remember: report hazards before hazards report you.",
+      "Facility notice: keep badges visible in restricted areas.",
+    },
+    voiceLines = {
+      -- alert = { wav = "announcements/alert.wav" },
+      -- lockdown = { files = { "announcements/lockdown_1.wav", "announcements/lockdown_2.wav" } },
+      -- short = { pcm = { 0, 12, 24, 12, 0, -12, -24, -12 } },
+    },
+    jingles = {
+      announcement = {
+        -- wav = "announcements/jingle.wav",
+        tones = {
+          { freq = 523, seconds = 0.09 },
+          { freq = 659, seconds = 0.09 },
+          { freq = 784, seconds = 0.12 },
+          { silence = 0.045 },
+        },
+      },
+      alarm = {
+        -- wav = "announcements/alarm_jingle.wav",
+        tones = {
+          { freq = 92, seconds = 0.17 },
+          { silence = 0.035 },
+          { freq = 74, seconds = 0.20 },
+          { freq = 118, seconds = 0.16 },
+          { silence = 0.045 },
+          { freq = 63, seconds = 0.24 },
+        },
+      },
+    },
+    fallbackSounds = {
+      { name = "minecraft:block.note_block.chime", volume = 1.4, pitch = 0.9 },
+      { name = "minecraft:block.note_block.bell", volume = 1.0, pitch = 1.25 },
+    },
+    alarmFallbackSounds = {
+      { name = "minecraft:block.note_block.bass", volume = 2.0, pitch = 0.45 },
+      { name = "minecraft:block.note_block.didgeridoo", volume = 1.7, pitch = 0.65 },
     },
   },
 
@@ -264,6 +338,17 @@ return {
     autoStressProfile = "power_fault",
   },
 
+  setup = {
+    enabled = true,
+    kiosk = true,
+    clearance = 5,
+    remoteEndpointTimeout = 0.75,
+    defaultDoorController = nil,
+    defaultDoorSide = "front",
+    defaultContactSide = "back",
+    defaultExitSide = "right",
+  },
+
   -- Source name to door id. Use "*" as a fallback for any reader.
   -- Disk drives, badge readers, player detectors, and remote reader peripherals
   -- are all treated as sources.
@@ -286,6 +371,7 @@ return {
   doors = {
     main = {
       label = "Main Door",
+      controller = "server",
       output = { side = "front" },
       activeOpen = true,
       openSeconds = 4,

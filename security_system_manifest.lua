@@ -6,6 +6,14 @@ return {
   baseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
   entry = "security_system.lua",
 
+  assets = {
+    -- Add announcement WAV assets here when committing audio files.
+    -- Entries are optional by default unless required = true.
+    -- { path = "announcements/jingle.wav", binary = true, kind = "wav" },
+    -- { path = "announcements/alarm_jingle.wav", binary = true, kind = "wav" },
+    -- { path = "announcements/badge_notice.wav", binary = true, kind = "wav" },
+  },
+
   files = {
     {
       path = "security_system_defaults.lua",
@@ -38,6 +46,18 @@ return {
       },
     },
     {
+      path = "security_system_announcements.lua",
+      required = true,
+      minSize = 1000,
+      contains = {
+        "Facility announcement audio",
+        "function M.loadWav",
+        "function M.buildVoiceBuffer",
+        "function M.buildAnnouncementBuffer",
+        "function M.play",
+      },
+    },
+    {
       path = "security_system_app.lua",
       required = true,
       minSize = 2000,
@@ -46,6 +66,9 @@ return {
         "security_system_defaults",
         "security_system_rednet",
         "security_system_notifications",
+        "security_system_announcements",
+        "function controllerMain()",
+        "kiosk_setup",
         "function main()",
         "return {",
       },

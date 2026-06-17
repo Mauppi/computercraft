@@ -2,7 +2,7 @@
 
 ## Server computer
 
-1. Put `security_system.lua`, `security_system_app.lua`, `security_system_defaults.lua`, `security_system_rednet.lua`, and `security_system_notifications.lua` on the main security computer.
+1. Put `security_system.lua`, `security_system_app.lua`, `security_system_defaults.lua`, `security_system_rednet.lua`, `security_system_notifications.lua`, and `security_system_announcements.lua` on the main security computer.
 2. Copy `security_config.example.lua` to `security_config.lua`.
 3. Edit `security_config.lua` for your doors, readers, branding, employee accounts, alarm outputs, and facility sensors.
 4. Attach/open a modem if kiosks or remote clients should connect.
@@ -24,7 +24,7 @@ Use `employee clearance <user> <level>` to grant limited kiosk administration. T
 
 ## Kiosk computers
 
-1. Put `security_system.lua`, `security_system_app.lua`, `security_system_defaults.lua`, `security_system_rednet.lua`, and `security_system_notifications.lua` on each kiosk computer.
+1. Put `security_system.lua`, `security_system_app.lua`, `security_system_defaults.lua`, `security_system_rednet.lua`, `security_system_notifications.lua`, and `security_system_announcements.lua` on each kiosk computer.
 2. Copy `security_kiosk_config.example.lua` to `security_config.lua`.
 3. Set `rednet.serverId` to the main server computer id, or leave it `nil` for broadcast discovery.
 4. For kiosk-only autorun, copy `startup_kiosk.lua` to `startup.lua` on the kiosk computer.
@@ -39,14 +39,64 @@ Employees can sign in, edit personal notes, read/post to the facility feed, send
 
 `startup_kiosk.lua` creates a kiosk config from `security_kiosk_config.example.lua` if `security_config.lua` does not exist, starts kiosk mode, and restarts it if it exits.
 
-`security_system.lua` is now only a small launcher. It uses `require("security_system_app")` to load the main app module. The app module uses `require("security_system_defaults")`, `require("security_system_rednet")`, and `require("security_system_notifications")` for defaults, encrypted Rednet wrapping, and kiosk notification handling.
+`security_system.lua` is now only a small launcher. It uses `require("security_system_app")` to load the main app module. The app module uses `require("security_system_defaults")`, `require("security_system_rednet")`, `require("security_system_notifications")`, and `require("security_system_announcements")` for defaults, encrypted Rednet wrapping, kiosk notification handling, and announcement audio.
 
-`startup_auto_update.lua` fetches `security_system_manifest.lua` from `https://raw.githubusercontent.com/Mauppi/computercraft/master/security_system_manifest.lua`, then downloads every listed app file from the manifest's `baseUrl`. The required files are `security_system_defaults.lua`, `security_system_rednet.lua`, `security_system_notifications.lua`, `security_system_app.lua`, and `security_system.lua`; the manifest can also keep startup scripts, examples, and docs synced. Its default after-update behavior is `run` for server mode and `reboot` for kiosk mode. HTTP must be enabled in the CC:Tweaked server config.
+`startup_auto_update.lua` fetches `security_system_manifest.lua` from `https://raw.githubusercontent.com/Mauppi/computercraft/master/security_system_manifest.lua`, then downloads every listed app file from the manifest's `baseUrl`. The required files are `security_system_defaults.lua`, `security_system_rednet.lua`, `security_system_notifications.lua`, `security_system_announcements.lua`, `security_system_app.lua`, and `security_system.lua`; the manifest can also keep startup scripts, examples, docs, and WAV assets synced. Its default after-update behavior is `run` for server mode and `reboot` for kiosk mode. HTTP must be enabled in the CC:Tweaked server config.
+
+For kiosk mode, `startup_auto_update.lua` also asks the main security server for a kiosk config using Rednet op `kiosk_config`. The server returns branding, kiosk settings, Rednet settings, monitor config, notifications, and announcements. If the synced config changes, the updater treats it like an update and follows the kiosk after-update action, which defaults to reboot. After config sync, the updater scans `announcements` for every `.wav` path in voice lines and jingles, downloads those files in binary mode from the manifest `baseUrl` or `announcements.assetBaseUrl`, and validates that each downloaded clip is a WAV file.
 
 Locked kiosks do not expose a Quit option and disable normal Ctrl+T termination in kiosk mode. Set `kiosk.locked = false` only for development computers.
 Logged-in employees can quit kiosk mode only if the server approves the `quitKiosk` permission. `kiosk.quitClearance` is only a local display fallback; server permissions remain authoritative.
 
 Kiosks stay synced to the server alarm/lockdown state through rednet broadcasts and a periodic heartbeat. If a kiosk has a speaker attached, it mirrors active alarm sounds locally.
+
+Logged-in kiosks auto-logout after `kiosk.autoLogoutSeconds` of no input. Logged-out kiosks reboot after `kiosk.autoRebootLoggedOutSeconds`, defaulting to 1800 seconds.
+
+## Setup Wizard And Door Controllers
+
+Use the server console command `setup` after an admin `login <admin-pin>` to configure facility hardware from the terminal. The setup wizard can scan server peripherals, scan a remote door controller, add or update doors, add facility sensors, add emergency buttons, and map reader sources to doors. Each change is saved to `security_config.lua` immediately.
+
+Kiosks also expose `Facility setup` for employees whose clearance meets `employees.permissions.setupFacility`, default C5. The kiosk sends setup requests to the server with the logged-in session token, and the server enforces the clearance before changing config.
+
+For distributed doors, put a computer near one door or a small group of doors, attach its redstone integrators/sensors, give it the same Rednet protocol/encryption settings as the server, and run:
+
+```lua
+security_system controller
+```
+
+or set its config mode:
+
+```lua
+return {
+  mode = "controller",
+  rednet = {
+    enabled = true,
+    protocol = "cc_security_v1",
+    serverId = 12,
+    encryption = {
+      enabled = true,
+      key = "replace-with-a-shared-facility-secret",
+      allowPlaintext = false,
+    },
+  },
+}
+```
+
+The server remains authoritative. Controller computers only answer encrypted endpoint read/write/scan requests. A door can point at one controller for all of its endpoints:
+
+```lua
+doors = {
+  lab_a = {
+    label = "Lab A",
+    controller = 23,
+    output = { side = "front" },
+    contact = { side = "back", openWhen = true },
+    requestExit = { side = "right", activeWhen = true },
+  },
+}
+```
+
+Use one controller computer per door when wiring is dense, or one controller for a few nearby doors when the redstone/peripheral layout is shared. The setup wizard stores the controller id on the door, so its output/contact/exit endpoints inherit that controller automatically.
 
 ## Rednet Encryption And Notifications
 
@@ -83,6 +133,45 @@ Employee clearance controls kiosk security actions:
 Change thresholds in `employees.permissions`, including `quitKiosk`.
 
 Facility logs are available from the kiosk menu. The server tags new log lines with a clearance marker such as `C2` or `C5`, and employees only receive log lines at or below their clearance. Configure this with `logs.clearances` and the `viewLogs` permission.
+
+Long log views use an interactive pager: Enter or N goes forward, P goes back, and Q closes the view.
+
+## Facility Announcements
+
+Admins can send a facility announcement from the server console:
+
+```lua
+announce <message>
+```
+
+Announcements are pushed to kiosks as real-time notifications. Kiosks with speakers play a stitched `speaker.playAudio` buffer when available: jingle, optional WAV/PCM voice line segments, then generated PCM voice if no file-backed voice line is configured. Configure this under `announcements`; scheduled announcements can be enabled with `announcements.auto.enabled = true`.
+
+Voice lines can be raw PCM tables, one WAV file, or multiple WAV segments:
+
+```lua
+announcements = {
+  syncAssets = true,
+  assetsRequired = false,
+  -- assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
+  voiceLines = {
+    badge_notice = { wav = "announcements/badge_notice.wav" },
+    lockdown = {
+      files = {
+        "announcements/lockdown_1.wav",
+        "announcements/lockdown_2.wav",
+      },
+    },
+  },
+  jingles = {
+    announcement = { wav = "announcements/jingle.wav" },
+    alarm = { wav = "announcements/alarm_jingle.wav" },
+  },
+}
+```
+
+WAV loading supports RIFF/WAVE PCM clips at 8-bit or 16-bit, mono or stereo. Clips are resampled to `announcements.sampleRate`, default `48000`, and mixed down to the signed 8-bit sample values expected by CC:Tweaked speakers. Keep stitched clips short enough for the configured `announcements.maxSamples`, default `128000`, or split long lines into shorter announcement segments.
+
+Committed audio can also be listed explicitly in `security_system_manifest.lua` under `assets`, `audioFiles`, or `wavs`. Those entries are optional unless `required = true` is set.
 
 ## Alarm Audio And Emergency Buttons
 

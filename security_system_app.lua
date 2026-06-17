@@ -14,6 +14,7 @@ local args = {}
 
 local secureRednet = require("security_system_rednet")
 local kioskNotifications = require("security_system_notifications")
+local facilityAnnouncements = require("security_system_announcements")
 
 local sides = { "top", "bottom", "left", "right", "front", "back" }
 local unpackArgs = table.unpack or unpack
@@ -55,6 +56,11 @@ local state = {
     token = nil,
     notifications = {},
     notificationSeen = {},
+    lastActivity = 0,
+    loggedOutSince = 0,
+  },
+  announcements = {
+    index = 0,
   },
   sensorDetails = {},
   alarm = {
@@ -302,6 +308,26 @@ function applyDefaults(userConfig)
     end
   end
 
+  merged.configSync = merged.configSync or shallowCopy(defaultConfig.configSync)
+  for key, value in pairs(defaultConfig.configSync) do
+    if merged.configSync[key] == nil then
+      merged.configSync[key] = shallowCopy(value)
+    end
+  end
+
+  merged.announcements = merged.announcements or shallowCopy(defaultConfig.announcements)
+  for key, value in pairs(defaultConfig.announcements) do
+    if merged.announcements[key] == nil then
+      merged.announcements[key] = shallowCopy(value)
+    end
+  end
+  merged.announcements.auto = merged.announcements.auto or shallowCopy(defaultConfig.announcements.auto)
+  for key, value in pairs(defaultConfig.announcements.auto) do
+    if merged.announcements.auto[key] == nil then
+      merged.announcements.auto[key] = shallowCopy(value)
+    end
+  end
+
   merged.employees = merged.employees or shallowCopy(defaultConfig.employees)
   for key, value in pairs(defaultConfig.employees) do
     if merged.employees[key] == nil then
@@ -331,6 +357,13 @@ function applyDefaults(userConfig)
   for key, value in pairs(defaultConfig.logs.clearances) do
     if merged.logs.clearances[key] == nil then
       merged.logs.clearances[key] = value
+    end
+  end
+
+  merged.setup = merged.setup or shallowCopy(defaultConfig.setup)
+  for key, value in pairs(defaultConfig.setup) do
+    if merged.setup[key] == nil then
+      merged.setup[key] = shallowCopy(value)
     end
   end
 
@@ -546,6 +579,114 @@ function endpointList(value)
   return { value }
 end
 
+function localComputerId()
+  if os.getComputerID then
+    return os.getComputerID()
+  end
+  return nil
+end
+
+function endpointController(endpoint)
+  if type(endpoint) ~= "table" then
+    return nil
+  end
+  return endpoint.controller or endpoint.computerId or endpoint.computer or endpoint.remote
+end
+
+function endpointIsRemote(endpoint)
+  local controller = endpointController(endpoint)
+  if controller == nil or controller == "" or controller == "server" or controller == "local" then
+    return false
+  end
+
+  local localId = localComputerId()
+  return tostring(controller) ~= tostring(localId or "")
+end
+
+function stripEndpointController(endpoint)
+  if type(endpoint) ~= "table" then
+    return endpoint
+  end
+
+  local copy = shallowCopy(endpoint)
+  copy.controller = nil
+  copy.computerId = nil
+  copy.computer = nil
+  copy.remote = nil
+  return copy
+end
+
+function handleInlineRednetWhileWaiting(sender, message)
+  if type(message) ~= "table" or not message.op then
+    return
+  end
+  if not handleRednetOperation then
+    return
+  end
+
+  local reply = { ok = false }
+  handleRednetOperation(sender, message, reply)
+  reply.requestId = message.requestId
+  pcall(sendRednet, sender, reply)
+end
+
+function remoteControllerRequest(controller, payload)
+  controller = tonumber(controller)
+  if not controller then
+    return false, "invalid controller id"
+  end
+  if not (config and config.rednet and config.rednet.enabled and rednet) then
+    return false, "rednet unavailable"
+  end
+
+  openRednet()
+  payload = payload or {}
+  local requestId = payload.requestId or makeId("controller")
+  payload.requestId = requestId
+
+  local sent, sendErr = sendRednet(controller, payload)
+  if not sent then
+    return false, sendErr or "send failed"
+  end
+
+  local timeout = tonumber(config.setup and config.setup.remoteEndpointTimeout) or 0.75
+  local deadline = os.clock() + timeout
+  while os.clock() < deadline do
+    local ok, sender, message, err = receiveRednet(math.max(0.05, deadline - os.clock()))
+    if ok and sender then
+      if sender == controller and type(message) == "table" and message.requestId == requestId then
+        return message.ok and true or false, message.error, message
+      end
+      handleInlineRednetWhileWaiting(sender, message)
+    elseif not ok then
+      return false, err or "receive failed"
+    end
+  end
+
+  return false, "controller timeout"
+end
+
+function remoteEndpointRequest(endpoint, action, extra)
+  local payload = extra or {}
+  payload.op = "controller_endpoint"
+  payload.action = action
+  payload.endpoint = stripEndpointController(endpoint)
+  return remoteControllerRequest(endpointController(endpoint), payload)
+end
+
+function remoteSetEndpoint(endpoint, active)
+  local ok, err = remoteEndpointRequest(endpoint, "write", { active = active and true or false })
+  return ok, err
+end
+
+function remoteReadEndpoint(endpoint)
+  local ok, err, reply = remoteEndpointRequest(endpoint, "read")
+  if ok and reply then
+    return reply.active and true or false, reply.raw
+  end
+  return false, nil, err
+end
+
 function normalizeEndpoint(endpoint)
   if type(endpoint) == "string" then
     return { side = endpoint }
@@ -557,6 +698,9 @@ function setEndpoint(endpoint, active)
   endpoint = normalizeEndpoint(endpoint)
   if type(endpoint) ~= "table" then
     return false, "invalid endpoint"
+  end
+  if endpointIsRemote(endpoint) then
+    return remoteSetEndpoint(endpoint, active)
   end
 
   local value = active and true or false
@@ -606,6 +750,9 @@ function readEndpoint(endpoint)
   endpoint = normalizeEndpoint(endpoint)
   if type(endpoint) ~= "table" then
     return false, nil
+  end
+  if endpointIsRemote(endpoint) then
+    return remoteReadEndpoint(endpoint)
   end
 
   local side = endpoint.side or "back"
@@ -670,6 +817,32 @@ function setOutputList(outputs, active)
   return allOk, lastErr
 end
 
+function endpointWithController(endpoint, controller)
+  endpoint = normalizeEndpoint(endpoint)
+  if type(endpoint) ~= "table" then
+    return endpoint
+  end
+  if controller == nil or controller == "" or controller == "server" or controller == "local" or endpointController(endpoint) ~= nil then
+    return endpoint
+  end
+
+  local copy = shallowCopy(endpoint)
+  copy.controller = controller
+  return copy
+end
+
+function endpointListWithController(value, controller)
+  local out = {}
+  for _, endpoint in ipairs(endpointList(value)) do
+    table.insert(out, endpointWithController(endpoint, controller))
+  end
+  return out
+end
+
+function setOutputListWithController(outputs, active, controller)
+  return setOutputList(endpointListWithController(outputs, controller), active)
+end
+
 function getDoorState(doorId)
   if not state.doors[doorId] then
     state.doors[doorId] = {
@@ -699,7 +872,7 @@ function setDoorOpen(doorId, open)
     return false, "door has no output"
   end
 
-  return setOutputList(outputs, active)
+  return setOutputListWithController(outputs, active, door.controller or door.computerId)
 end
 
 function scheduleTimer(seconds, payload)
@@ -820,6 +993,7 @@ function alarmStatePayload()
       textColor = brand.textColor,
       permissions = {
         quitKiosk = config.employees and config.employees.permissions and config.employees.permissions.quitKiosk or 5,
+        setupFacility = config.employees and config.employees.permissions and config.employees.permissions.setupFacility or 5,
       },
     },
     alarm = {
@@ -903,6 +1077,58 @@ function broadcastLockdownNotification(active, actor, source)
       actor = actor,
       source = source,
     })
+  end
+end
+
+function announcementEnabled()
+  return not (config.announcements and config.announcements.enabled == false)
+end
+
+function broadcastAnnouncement(text, actor, voiceLine)
+  if not announcementEnabled() then
+    return false, "announcements disabled"
+  end
+
+  text = tostring(text or "")
+  if text == "" then
+    return false, "empty announcement"
+  end
+
+  local notification = makeNotification("announcement", "Facility Announcement", text, "info", {
+    actor = actor or "system",
+    voiceLine = voiceLine,
+  })
+  broadcastKioskNotification(notification)
+  audit("ANNOUNCEMENT", {
+    actor = actor or "system",
+    text = text,
+    voiceLine = voiceLine,
+  })
+  return true
+end
+
+function nextConfiguredAnnouncement()
+  local lines = config.announcements and config.announcements.lines or {}
+  if type(lines) ~= "table" or #lines == 0 then
+    return nil
+  end
+
+  state.announcements.index = (state.announcements.index or 0) + 1
+  if state.announcements.index > #lines then
+    state.announcements.index = 1
+  end
+
+  local line = lines[state.announcements.index]
+  if type(line) == "table" then
+    return line.text or line.message or line.title, line.voiceLine or line.id
+  end
+  return tostring(line), nil
+end
+
+function scheduleAnnouncementTimer()
+  local auto = config.announcements and config.announcements.auto or {}
+  if auto.enabled then
+    scheduleTimer(tonumber(auto.intervalSeconds) or 900, { type = "announcement" })
   end
 end
 
@@ -1617,7 +1843,7 @@ function checkDoorSensors()
     local doorState = getDoorState(doorId)
 
     if door.contact then
-      local active, raw = readEndpoint(door.contact)
+      local active, raw = readEndpoint(endpointWithController(door.contact, door.controller or door.computerId))
       if raw ~= nil then
         local isOpen = active == expectedValue(door.contact, door.contact.openWhen ~= false)
         if isOpen and doorState.locked and now > (doorState.authorizedUntil or 0) then
@@ -1628,7 +1854,7 @@ function checkDoorSensors()
 
     if door.requestExit then
       local key = "exit:" .. tostring(doorId)
-      local active, raw = readEndpoint(door.requestExit)
+      local active, raw = readEndpoint(endpointWithController(door.requestExit, door.controller or door.computerId))
       if raw ~= nil then
         local requested = active == expectedValue(door.requestExit, true)
         if requested and not state.sensors[key] then
@@ -2044,6 +2270,95 @@ function receiveRednet(timeout)
   return true, sender, decoded, nil
 end
 
+function peripheralSummary()
+  local out = {}
+  if not peripheral then
+    return out
+  end
+
+  for _, name in ipairs(peripheral.getNames()) do
+    local types = { peripheral.getType(name) }
+    local methods = {}
+    local methodSet = methodMap(name)
+    for method in pairs(methodSet) do
+      table.insert(methods, method)
+    end
+    table.sort(methods)
+    table.insert(out, {
+      name = name,
+      types = types,
+      methods = methods,
+    })
+  end
+
+  table.sort(out, function(a, b)
+    return tostring(a.name) < tostring(b.name)
+  end)
+  return out
+end
+
+function controllerSenderAllowed(sender)
+  local serverId = config and config.rednet and config.rednet.serverId
+  return serverId == nil or tostring(sender) == tostring(serverId)
+end
+
+function handleControllerMessage(sender, message)
+  if type(message) ~= "table" or not message.op then
+    return
+  end
+
+  local reply = {
+    ok = false,
+    requestId = message.requestId,
+    controllerId = localComputerId(),
+  }
+
+  if not controllerSenderAllowed(sender) then
+    reply.error = "denied"
+  elseif message.op == "controller_endpoint" then
+    local endpoint = stripEndpointController(message.endpoint)
+    if message.action == "write" then
+      local ok, err = setEndpoint(endpoint, message.active and true or false)
+      reply.ok = ok
+      reply.error = err
+    elseif message.action == "read" then
+      local active, raw, err = readEndpoint(endpoint)
+      reply.ok = raw ~= nil
+      reply.active = active and true or false
+      reply.raw = raw
+      reply.error = err
+    else
+      reply.error = "unknown endpoint action"
+    end
+  elseif message.op == "controller_scan" or message.op == "controller_ping" then
+    reply.ok = true
+    reply.peripherals = peripheralSummary()
+  else
+    reply.error = "unknown controller op"
+  end
+
+  pcall(sendRednet, sender, reply)
+end
+
+function broadcastControllerHello()
+  if not (config and config.rednet and config.rednet.enabled and rednet) then
+    return
+  end
+
+  local payload = {
+    op = "controller_hello",
+    controllerId = localComputerId(),
+    label = os.getComputerLabel and os.getComputerLabel() or nil,
+    peripherals = peripheralSummary(),
+  }
+  local serverId = config.rednet and config.rednet.serverId
+  if serverId then
+    pcall(sendRednet, serverId, payload)
+  else
+    pcall(broadcastRednet, payload)
+  end
+end
+
 function accountsPath()
   return (config.employees and config.employees.accountsFile) or ACCOUNTS_FILE
 end
@@ -2114,8 +2429,37 @@ function publicBrandPayload()
     allowSelfRegistration = config.employees and config.employees.allowSelfRegistration or false,
     permissions = {
       quitKiosk = config.employees and config.employees.permissions and config.employees.permissions.quitKiosk or 5,
+      setupFacility = config.employees and config.employees.permissions and config.employees.permissions.setupFacility or 5,
     },
   }
+end
+
+function serverComputerId()
+  return os.getComputerID and os.getComputerID() or nil
+end
+
+function publicKioskConfig()
+  local rednetConfig = shallowCopy(config.rednet or {})
+  rednetConfig.serverId = serverComputerId()
+
+  local out = {
+    mode = "kiosk",
+    siteName = config.siteName,
+    facilityName = config.facilityName,
+    branding = publicBrandPayload(),
+    rednet = rednetConfig,
+    kiosk = shallowCopy(config.kiosk or {}),
+    notifications = shallowCopy(config.notifications or {}),
+  }
+
+  if not config.configSync or config.configSync.includeMonitors ~= false then
+    out.monitors = shallowCopy(config.kioskMonitors or config.monitors or {})
+  end
+  if not config.configSync or config.configSync.includeAnnouncements ~= false then
+    out.announcements = shallowCopy(config.announcements or {})
+  end
+
+  return out
 end
 
 function employeeRecord(username)
@@ -2450,6 +2794,239 @@ function statusSnapshot()
   }
 end
 
+function cleanConfigId(value, fallback)
+  local text = string.lower(tostring(value or fallback or "item"))
+  text = string.gsub(text, "%s+", "_")
+  text = string.gsub(text, "[^%w_%-]", "")
+  if text == "" then
+    text = tostring(fallback or "item")
+  end
+  return text
+end
+
+function setupClearanceLevel()
+  return tonumber(config.setup and config.setup.clearance) or permissionLevel("setupFacility")
+end
+
+function employeeCanSetup(record)
+  return employeeClearance(record) >= setupClearanceLevel()
+end
+
+function requireSetupPermission(token)
+  local record = sessionRecord(token)
+  if not record then
+    return nil, "session expired"
+  end
+  if config.setup and config.setup.enabled == false then
+    return nil, "setup disabled"
+  end
+  if not employeeCanSetup(record) then
+    audit("SETUP_DENIED", { user = record.username, clearance = employeeClearance(record) })
+    return nil, "clearance denied"
+  end
+  return record
+end
+
+function setupBool(value, defaultValue)
+  if value == nil or value == "" then
+    return defaultValue
+  end
+  local text = string.lower(tostring(value))
+  return text == "y" or text == "yes" or text == "true" or text == "1" or value == true
+end
+
+function setupEndpointFromValue(value, defaultSide, controller)
+  if type(value) == "table" then
+    local endpoint = shallowCopy(value)
+    if endpoint.side == nil or endpoint.side == "" then
+      endpoint.side = defaultSide
+    end
+    if controller and controller ~= "" and controller ~= "server" and controller ~= "local" and endpointController(endpoint) == nil then
+      endpoint.controller = controller
+    end
+    return endpoint
+  end
+
+  local endpoint = { side = tostring(value or defaultSide or "back") }
+  if controller and controller ~= "" and controller ~= "server" and controller ~= "local" then
+    endpoint.controller = controller
+  end
+  return endpoint
+end
+
+function setupSummary()
+  local doors = {}
+  for _, doorId in ipairs(tableKeys(config.doors)) do
+    local door = config.doors[doorId]
+    table.insert(doors, {
+      id = doorId,
+      label = door.label or doorId,
+      controller = door.controller or door.computerId or "server",
+      output = door.output or door.outputs,
+      contact = door.contact,
+      requestExit = door.requestExit,
+    })
+  end
+
+  return {
+    computerId = localComputerId(),
+    setupClearance = setupClearanceLevel(),
+    peripherals = peripheralSummary(),
+    doors = doors,
+    readers = shallowCopy(config.readers or {}),
+    sensors = shallowCopy(config.sensors or {}),
+    emergencyButtons = shallowCopy(config.emergencyButtons or {}),
+    generators = shallowCopy(config.generators or {}),
+  }
+end
+
+function setupScanController(controller)
+  if controller == nil or controller == "" or controller == "server" or controller == "local" or tostring(controller) == tostring(localComputerId() or "") then
+    return true, { controllerId = localComputerId(), peripherals = peripheralSummary() }
+  end
+
+  local ok, err, reply = remoteControllerRequest(controller, { op = "controller_scan" })
+  if ok and reply then
+    return true, reply
+  end
+  return false, err or "scan failed"
+end
+
+function saveSetupChange(actor, action, detail)
+  saveConfig()
+  audit("SETUP_CHANGE", {
+    actor = actor,
+    action = action,
+    detail = detail,
+  })
+  markDirty()
+end
+
+function applySetupDoor(message, actor)
+  config.doors = config.doors or {}
+  config.readers = config.readers or {}
+
+  local doorId = cleanConfigId(message.id or message.doorId or message.name, "door")
+  local existing = config.doors[doorId] or {}
+  local controller = tostring(message.controller or message.controllerId or existing.controller or config.setup.defaultDoorController or "server")
+  local output = setupEndpointFromValue(message.output or message.endpoint or message.outputSide, config.setup.defaultDoorSide or "front", controller)
+
+  local door = shallowCopy(existing)
+  door.label = tostring(message.label or message.name or existing.label or doorId)
+  door.controller = controller
+  door.output = output
+  door.outputs = nil
+  door.activeOpen = setupBool(message.activeOpen, existing.activeOpen ~= false)
+  door.openSeconds = tonumber(message.openSeconds) or tonumber(existing.openSeconds) or tonumber(config.defaultOpenSeconds) or 4
+  door.alarmOnDenied = setupBool(message.alarmOnDenied, existing.alarmOnDenied ~= false)
+  door.badges = existing.badges or {}
+  door.players = existing.players or {}
+  door.pins = existing.pins or {}
+
+  if message.contact or message.contactSide then
+    door.contact = setupEndpointFromValue(message.contact or message.contactSide, config.setup.defaultContactSide or "back", controller)
+    if message.contactOpenWhen ~= nil then
+      door.contact.openWhen = setupBool(message.contactOpenWhen, true)
+    end
+  end
+  if message.requestExit or message.exitSide then
+    door.requestExit = setupEndpointFromValue(message.requestExit or message.exitSide, config.setup.defaultExitSide or "right", controller)
+    if message.exitActiveWhen ~= nil then
+      door.requestExit.activeWhen = setupBool(message.exitActiveWhen, true)
+    end
+  end
+
+  config.doors[doorId] = door
+  if message.reader and tostring(message.reader) ~= "" then
+    config.readers[tostring(message.reader)] = doorId
+  end
+
+  getDoorState(doorId)
+  saveSetupChange(actor, "door", { door = doorId, controller = controller })
+  return true, "door saved", { door = doorId }
+end
+
+function applySetupSensor(message, actor)
+  config.sensors = config.sensors or {}
+
+  local sensorType = tostring(message.sensorType or message.type or "redstone")
+  local sensor = {
+    id = cleanConfigId(message.id or message.name, "sensor"),
+    name = tostring(message.name or message.label or "Facility Sensor"),
+    profile = tostring(message.profile or "facility_fault"),
+  }
+
+  if sensorType == "create_stress" or sensorType == "create_power" or sensorType == "stressometer" then
+    sensor.type = "create_stress"
+    sensor.peripheral = tostring(message.peripheral or message.name or "")
+    sensor.maxLoad = tonumber(message.maxLoad) or 0.9
+    sensor.profile = tostring(message.profile or "power_fault")
+  elseif sensorType == "peripheral" or sensorType == "generic" then
+    sensor.type = "peripheral"
+    sensor.peripheral = tostring(message.peripheral or "")
+    sensor.method = tostring(message.method or "")
+    sensor.field = message.field ~= "" and message.field or nil
+    sensor.min = tonumber(message.min)
+    sensor.max = tonumber(message.max)
+    sensor.alarmWhen = message.alarmWhen
+  else
+    sensor.type = "redstone"
+    sensor.input = setupEndpointFromValue(message.input or message.side, tostring(message.side or "left"), message.controller or message.controllerId)
+    sensor.alarmWhen = setupBool(message.alarmWhen, true)
+  end
+
+  table.insert(config.sensors, sensor)
+  saveSetupChange(actor, "sensor", { sensor = sensor.name, type = sensor.type })
+  return true, "sensor saved", { sensor = sensor }
+end
+
+function applySetupEmergencyButton(message, actor)
+  config.emergencyButtons = config.emergencyButtons or {}
+  local button = {
+    id = cleanConfigId(message.id or message.name, "emergency"),
+    name = tostring(message.name or "Emergency Button"),
+    input = setupEndpointFromValue(message.input or message.side, tostring(message.side or "top"), message.controller or message.controllerId),
+    activeWhen = setupBool(message.activeWhen, true),
+    profile = tostring(message.profile or "emergency"),
+    reason = tostring(message.reason or "emergency button"),
+  }
+  table.insert(config.emergencyButtons, button)
+  saveSetupChange(actor, "emergency_button", { button = button.name })
+  return true, "emergency button saved", { button = button }
+end
+
+function applySetupReader(message, actor)
+  local source = tostring(message.source or message.reader or "")
+  local doorId = tostring(message.door or message.doorId or "")
+  if source == "" or doorId == "" or not (config.doors and config.doors[doorId]) then
+    return false, "reader source and existing door id required"
+  end
+
+  config.readers = config.readers or {}
+  config.readers[source] = doorId
+  saveSetupChange(actor, "reader", { source = source, door = doorId })
+  return true, "reader mapped", { source = source, door = doorId }
+end
+
+function handleSetupAction(message, actor)
+  local action = tostring(message.action or "summary")
+  if action == "summary" then
+    return true, "summary", { summary = setupSummary() }
+  elseif action == "scan" then
+    local ok, result = setupScanController(message.controller or message.controllerId)
+    return ok, ok and "scan complete" or result, ok and { scan = result } or nil
+  elseif action == "add_door" or action == "door" then
+    return applySetupDoor(message, actor)
+  elseif action == "add_sensor" or action == "sensor" then
+    return applySetupSensor(message, actor)
+  elseif action == "add_emergency" or action == "emergency_button" then
+    return applySetupEmergencyButton(message, actor)
+  elseif action == "map_reader" or action == "reader" then
+    return applySetupReader(message, actor)
+  end
+  return false, "unknown setup action"
+end
+
 function handleStatusMessage(reply)
   reply.ok = true
   reply.status = statusSnapshot()
@@ -2596,6 +3173,47 @@ function handleKioskLogsMessage(message, reply)
   end
 end
 
+function handleKioskConfigMessage(reply)
+  if config.configSync and config.configSync.enabled == false then
+    reply.error = "config sync disabled"
+    return
+  end
+  if config.configSync and config.configSync.allowKioskPull == false then
+    reply.error = "config sync denied"
+    return
+  end
+
+  reply.ok = true
+  reply.config = publicKioskConfig()
+  reply.configVersion = tostring(config.configVersion or config.updatedAt or nowMillis())
+end
+
+function handleKioskSetupMessage(message, reply)
+  if config.setup and config.setup.kiosk == false then
+    reply.error = "kiosk setup disabled"
+    return
+  end
+
+  local record, err = requireSetupPermission(message.token)
+  if not record then
+    reply.error = err
+    return
+  end
+
+  local ok, result, extra = handleSetupAction(message, record.username)
+  reply.ok = ok
+  if ok then
+    reply.message = result
+  else
+    reply.error = result
+  end
+  if type(extra) == "table" then
+    for key, value in pairs(extra) do
+      reply[key] = value
+    end
+  end
+end
+
 function kioskSecurityPermission(action)
   if action == "emergency" then
     return "triggerEmergency"
@@ -2607,6 +3225,8 @@ function kioskSecurityPermission(action)
     return "operateDoors"
   elseif action == "quit_kiosk" then
     return "quitKiosk"
+  elseif action == "setup" then
+    return "setupFacility"
   end
   return "triggerAlarm"
 end
@@ -2760,8 +3380,14 @@ function handleRednetOperation(sender, message, reply)
     handleKioskStatusMessage(message, reply)
   elseif op == "kiosk_logs" then
     handleKioskLogsMessage(message, reply)
+  elseif op == "kiosk_config" or op == "config_sync" then
+    handleKioskConfigMessage(reply)
+  elseif op == "kiosk_setup" then
+    handleKioskSetupMessage(message, reply)
   elseif op == "kiosk_security_action" then
     handleKioskSecurityActionMessage(sender, message, reply)
+  elseif op == "controller_hello" then
+    reply.ok = true
   elseif op == "facility_fault" then
     handleFacilityFaultMessage(sender, message, reply)
   elseif op == "unlock" then
@@ -3467,21 +4093,52 @@ end
 function printPaged(lines)
   local width, height = term.getSize()
   local pageLines = math.max(3, height - 3)
-  local printed = 0
-
+  local wrappedLines = {}
   for lineIndex, line in ipairs(lines) do
     local wrapped = wrapConsoleLine(line, width)
     for wrappedIndex, part in ipairs(wrapped) do
-      print(part)
-      printed = printed + 1
+      table.insert(wrappedLines, part)
+    end
+  end
 
-      local hasMore = lineIndex < #lines or wrappedIndex < #wrapped
-      if hasMore and printed >= pageLines then
-        if waitForHelpPage() then
-          return
-        end
-        printed = 0
-      end
+  if #wrappedLines <= pageLines then
+    for _, line in ipairs(wrappedLines) do
+      print(line)
+    end
+    return
+  end
+
+  local page = 1
+  local pages = math.ceil(#wrappedLines / pageLines)
+  while true do
+    clearScreen()
+    print("Page " .. tostring(page) .. "/" .. tostring(pages))
+    print(string.rep("-", math.min(width, 28)))
+
+    local first = ((page - 1) * pageLines) + 1
+    local last = math.min(#wrappedLines, first + pageLines - 1)
+    for index = first, last do
+      print(wrappedLines[index])
+    end
+
+    print()
+    local prompt = page < pages and "[Enter/N] next  [P] prev  [Q] quit: " or "[Enter/Q] close  [P] prev: "
+    local choice
+    if config and tostring(config.mode or "") == "kiosk" and kioskRead then
+      choice = string.lower(kioskRead(prompt) or "")
+    else
+      write(prompt)
+      choice = string.lower(read() or "")
+    end
+
+    if choice == "q" then
+      return
+    elseif choice == "p" and page > 1 then
+      page = page - 1
+    elseif page < pages then
+      page = page + 1
+    else
+      return
     end
   end
 end
@@ -3496,6 +4153,8 @@ function printHelp()
     "  lock <door>",
     "  alarm <reason>",
     "  emergency <reason>",
+    "  announce <message>",
+    "  setup",
     "  reset",
     "  lockdown",
     "  unlockdown",
@@ -3510,7 +4169,7 @@ function printHelp()
     "  save",
     "  quit",
     "",
-    "Press any key at -- more --, or Q to stop help.",
+    "Paged output uses Enter/N for next, P for previous, and Q to close.",
   })
 end
 
@@ -3610,6 +4269,199 @@ function handleEmployeeCommand(words)
   end
 end
 
+function promptLine(label, defaultValue)
+  if defaultValue ~= nil and defaultValue ~= "" then
+    write(label .. " [" .. tostring(defaultValue) .. "]: ")
+  else
+    write(label .. ": ")
+  end
+  local value = read()
+  if value == nil or value == "" then
+    return defaultValue
+  end
+  return value
+end
+
+function promptBool(label, defaultValue)
+  local marker = defaultValue and "Y/n" or "y/N"
+  local value = string.lower(tostring(promptLine(label .. " (" .. marker .. ")", "") or ""))
+  if value == "" then
+    return defaultValue and true or false
+  end
+  return value == "y" or value == "yes" or value == "true" or value == "1"
+end
+
+function promptNumber(label, defaultValue)
+  local value = promptLine(label, defaultValue)
+  return tonumber(value) or defaultValue
+end
+
+function promptEndpoint(label, defaultSide, controller)
+  print(label)
+  local side = promptLine("  Redstone side", defaultSide or "back")
+  local peripheralName = promptLine("  Redstone integrator/peripheral blank=computer side", "")
+  local analog = promptBool("  Analog endpoint", false)
+  local endpoint = {
+    side = side or defaultSide or "back",
+  }
+  if peripheralName and peripheralName ~= "" then
+    endpoint.peripheral = peripheralName
+  end
+  if analog then
+    endpoint.analog = true
+    endpoint.threshold = promptNumber("  Analog threshold", 1)
+  end
+  if controller and controller ~= "" and controller ~= "server" and controller ~= "local" then
+    endpoint.controller = controller
+  end
+  return endpoint
+end
+
+function printPeripheralSummary(items)
+  if type(items) ~= "table" or #items == 0 then
+    print("No peripherals reported.")
+    return
+  end
+
+  for _, item in ipairs(items) do
+    local types = type(item.types) == "table" and table.concat(item.types, ",") or tostring(item.types or "?")
+    print(tostring(item.name) .. " [" .. types .. "]")
+    if type(item.methods) == "table" and #item.methods > 0 then
+      print("  " .. truncate(table.concat(item.methods, ", "), 70))
+    end
+  end
+end
+
+function setupConsoleAddDoor()
+  local controller = tostring(promptLine("Controller computer id blank/server=server", config.setup.defaultDoorController or "server") or "server")
+  local payload = {
+    action = "add_door",
+    id = promptLine("Door id", nil),
+    label = promptLine("Door label", nil),
+    controller = controller,
+    output = promptEndpoint("Door lock/output endpoint", config.setup.defaultDoorSide or "front", controller),
+    activeOpen = promptBool("Output active opens door", true),
+    openSeconds = promptNumber("Open seconds", config.defaultOpenSeconds or 4),
+    alarmOnDenied = promptBool("Alarm after denied attempts", true),
+  }
+  if promptBool("Add forced-open contact sensor", false) then
+    payload.contact = promptEndpoint("Contact input endpoint", config.setup.defaultContactSide or "back", controller)
+    payload.contactOpenWhen = promptBool("Contact active means open", true)
+  end
+  if promptBool("Add request-to-exit button", false) then
+    payload.requestExit = promptEndpoint("Exit button input endpoint", config.setup.defaultExitSide or "right", controller)
+    payload.exitActiveWhen = promptBool("Exit input active when pressed", true)
+  end
+  payload.reader = promptLine("Reader source to map blank=skip", "")
+
+  local ok, message = handleSetupAction(payload, "console")
+  print(ok and tostring(message) or ("Setup failed: " .. tostring(message)))
+end
+
+function setupConsoleAddSensor()
+  print("Sensor type: 1 redstone  2 Create stress  3 generic peripheral")
+  local choice = promptLine("Type", "1")
+  local payload = {
+    action = "add_sensor",
+    name = promptLine("Sensor name", "Facility Sensor"),
+    profile = promptLine("Alarm profile", "facility_fault"),
+  }
+  if choice == "2" then
+    payload.sensorType = "create_stress"
+    payload.peripheral = promptLine("Stress peripheral name", "")
+    payload.maxLoad = promptNumber("Max load 0.9 = 90%", 0.9)
+    payload.profile = promptLine("Alarm profile", "power_fault")
+  elseif choice == "3" then
+    payload.sensorType = "peripheral"
+    payload.peripheral = promptLine("Peripheral name", "")
+    payload.method = promptLine("Method", "")
+    payload.field = promptLine("Table field blank=whole value", "")
+    payload.max = promptNumber("Alarm above blank=none", nil)
+    payload.min = promptNumber("Alarm below blank=none", nil)
+  else
+    payload.sensorType = "redstone"
+    payload.controller = promptLine("Controller id blank/server=server", "server")
+    payload.input = promptEndpoint("Sensor input endpoint", "left", payload.controller)
+    payload.alarmWhen = promptBool("Input active means fault", true)
+  end
+
+  local ok, message = handleSetupAction(payload, "console")
+  print(ok and tostring(message) or ("Setup failed: " .. tostring(message)))
+end
+
+function setupConsoleAddEmergency()
+  local controller = promptLine("Controller id blank/server=server", "server")
+  local payload = {
+    action = "add_emergency",
+    name = promptLine("Button name", "Emergency Button"),
+    controller = controller,
+    input = promptEndpoint("Emergency input endpoint", "top", controller),
+    activeWhen = promptBool("Input active means pressed", true),
+    profile = promptLine("Alarm profile", "emergency"),
+    reason = promptLine("Alarm reason", "emergency button"),
+  }
+  local ok, message = handleSetupAction(payload, "console")
+  print(ok and tostring(message) or ("Setup failed: " .. tostring(message)))
+end
+
+function setupConsoleMapReader()
+  local payload = {
+    action = "map_reader",
+    source = promptLine("Reader source/peripheral name", ""),
+    door = promptLine("Door id", ""),
+  }
+  local ok, message = handleSetupAction(payload, "console")
+  print(ok and tostring(message) or ("Setup failed: " .. tostring(message)))
+end
+
+function setupWizard()
+  while true do
+    print()
+    print("Facility Setup")
+    print("1. Summary")
+    print("2. Scan server peripherals")
+    print("3. Scan door controller")
+    print("4. Add/update door")
+    print("5. Add facility sensor")
+    print("6. Add emergency button")
+    print("7. Map reader to door")
+    print("B. Back")
+    local choice = string.lower(tostring(promptLine("> ", "") or ""))
+
+    if choice == "1" then
+      local summary = setupSummary()
+      print("Server computer: " .. tostring(summary.computerId or "?"))
+      print("Setup clearance: C" .. tostring(summary.setupClearance or "?"))
+      print("Doors: " .. tostring(#(summary.doors or {})))
+      for _, door in ipairs(summary.doors or {}) do
+        print("  " .. tostring(door.id) .. " -> " .. tostring(door.label) .. " controller " .. tostring(door.controller))
+      end
+      print("Sensors: " .. tostring(#(summary.sensors or {})) .. ", emergency buttons: " .. tostring(#(summary.emergencyButtons or {})))
+    elseif choice == "2" then
+      printPeripheralSummary(peripheralSummary())
+    elseif choice == "3" then
+      local controller = promptLine("Controller computer id", "")
+      local ok, scan = setupScanController(controller)
+      if ok then
+        print("Controller: " .. tostring(scan.controllerId or controller or "server"))
+        printPeripheralSummary(scan.peripherals or {})
+      else
+        print("Scan failed: " .. tostring(scan))
+      end
+    elseif choice == "4" then
+      setupConsoleAddDoor()
+    elseif choice == "5" then
+      setupConsoleAddSensor()
+    elseif choice == "6" then
+      setupConsoleAddEmergency()
+    elseif choice == "7" then
+      setupConsoleMapReader()
+    elseif choice == "b" then
+      return
+    end
+  end
+end
+
 function handleCommand(line)
   local words = splitWords(line)
   local command = words[1]
@@ -3674,6 +4526,15 @@ function handleCommand(line)
     if requireAdmin() then
       raiseAlarm(joinWords(words, 2) ~= "" and joinWords(words, 2) or "manual emergency", nil, "console", "emergency")
       print("Emergency alarm raised")
+    end
+  elseif command == "announce" then
+    if requireAdmin() then
+      local ok, err = broadcastAnnouncement(joinWords(words, 2), "console")
+      print(ok and "Announcement sent" or ("Announcement failed: " .. tostring(err)))
+    end
+  elseif command == "setup" then
+    if requireAdmin() then
+      setupWizard()
     end
   elseif command == "reset" then
     if requireAdmin() then
@@ -3789,18 +4650,90 @@ function drawKioskHeader(brand, user)
   end
 end
 
-function kioskRead(label, mask)
-  write(label)
-  if mask then
-    return read(mask)
+function kioskAutoLogoutSignal()
+  return "__security_kiosk_auto_logout__"
+end
+
+function touchKioskActivity()
+  state.kiosk.lastActivity = os.clock()
+end
+
+function kioskAutoLogoutSeconds()
+  if state.kiosk and state.kiosk.user then
+    return tonumber(config.kiosk and config.kiosk.autoLogoutSeconds) or 0
   end
-  return read()
+  return 0
+end
+
+function kioskReadWithTimeout(label, mask, timeout)
+  write(label or "")
+  local text = ""
+  local timer
+  local function resetTimer()
+    if timer and os.cancelTimer then
+      pcall(os.cancelTimer, timer)
+    end
+    timer = timeout and timeout > 0 and os.startTimer(timeout) or nil
+  end
+  resetTimer()
+
+  while true do
+    local event = { os.pullEvent() }
+    local name = event[1]
+
+    if name == "timer" and event[2] == timer then
+      error(kioskAutoLogoutSignal(), 0)
+    elseif name == "char" then
+      text = text .. tostring(event[2] or "")
+      write(mask and tostring(mask) or tostring(event[2] or ""))
+      touchKioskActivity()
+      resetTimer()
+    elseif name == "paste" then
+      local pasted = tostring(event[2] or "")
+      text = text .. pasted
+      if mask then
+        write(string.rep(tostring(mask), string.len(pasted)))
+      else
+        write(pasted)
+      end
+      touchKioskActivity()
+      resetTimer()
+    elseif name == "key" then
+      local key = event[2]
+      if key == keys.enter then
+        print()
+        touchKioskActivity()
+        return text
+      elseif key == keys.backspace and string.len(text) > 0 then
+        text = string.sub(text, 1, -2)
+        local x, y = term.getCursorPos()
+        if x > 1 then
+          term.setCursorPos(x - 1, y)
+          write(" ")
+          term.setCursorPos(x - 1, y)
+        end
+        touchKioskActivity()
+        resetTimer()
+      end
+    end
+  end
+end
+
+function kioskRead(label, mask)
+  local timeout = kioskAutoLogoutSeconds()
+  if timeout > 0 then
+    return kioskReadWithTimeout(label, mask, timeout)
+  end
+
+  write(label)
+  local value = mask and read(mask) or read()
+  touchKioskActivity()
+  return value
 end
 
 function pause()
   print()
-  write("Press enter...")
-  read()
+  kioskRead("Press enter...")
 end
 
 function kioskNotificationTargetAllowed(notification, envelope)
@@ -3824,7 +4757,11 @@ function kioskApplyNotification(notification, sender, envelope)
 
   local item = kioskNotifications.push(state.kiosk, notification, config.notifications and config.notifications.maxItems)
   if item then
-    kioskNotifications.playSound(findSpeakers(), item, config)
+    if item.kind == "announcement" or item.kind == "alarm" or item.kind == "emergency" or item.kind == "lockdown" then
+      facilityAnnouncements.play(findSpeakers(), item, config.announcements or {})
+    else
+      kioskNotifications.playSound(findSpeakers(), item, config)
+    end
     markDirty()
   end
 end
@@ -4126,7 +5063,7 @@ function readMultilineBody(existing)
 
   local lines = {}
   while true do
-    local line = read()
+    local line = kioskRead("")
     if line == "." then
       break
     end
@@ -4369,6 +5306,208 @@ function kioskNotificationCenter(brand, user)
   return true
 end
 
+function kioskSetupRequest(serverId, token, payload)
+  payload = payload or {}
+  payload.token = token
+  return kioskRequest(serverId, "kiosk_setup", payload, 4)
+end
+
+function kioskPromptLine(label, defaultValue)
+  local prompt = label .. (defaultValue ~= nil and defaultValue ~= "" and (" [" .. tostring(defaultValue) .. "]") or "") .. ": "
+  local value = kioskRead(prompt)
+  if value == nil or value == "" then
+    return defaultValue
+  end
+  return value
+end
+
+function kioskPromptBool(label, defaultValue)
+  local marker = defaultValue and "Y/n" or "y/N"
+  local value = string.lower(tostring(kioskPromptLine(label .. " (" .. marker .. ")", "") or ""))
+  if value == "" then
+    return defaultValue and true or false
+  end
+  return value == "y" or value == "yes" or value == "true" or value == "1"
+end
+
+function kioskPromptNumber(label, defaultValue)
+  local value = kioskPromptLine(label, defaultValue)
+  return tonumber(value) or defaultValue
+end
+
+function kioskEndpointPrompt(label, defaultSide, controller)
+  print(label)
+  local side = kioskPromptLine("  Side", defaultSide or "back")
+  local peripheralName = kioskPromptLine("  Peripheral blank=computer side", "")
+  local analog = kioskPromptBool("  Analog", false)
+  local endpoint = { side = side or defaultSide or "back" }
+  if peripheralName and peripheralName ~= "" then
+    endpoint.peripheral = peripheralName
+  end
+  if analog then
+    endpoint.analog = true
+    endpoint.threshold = kioskPromptNumber("  Threshold", 1)
+  end
+  if controller and controller ~= "" and controller ~= "server" and controller ~= "local" then
+    endpoint.controller = controller
+  end
+  return endpoint
+end
+
+function kioskPrintSetupSummary(summary)
+  print("Server computer: " .. tostring(summary.computerId or "?"))
+  print("Setup clearance: C" .. tostring(summary.setupClearance or "?"))
+  print("Doors")
+  for _, door in ipairs(summary.doors or {}) do
+    print("  " .. tostring(door.id) .. " - " .. tostring(door.label) .. " [" .. tostring(door.controller) .. "]")
+  end
+  print("Sensors: " .. tostring(#(summary.sensors or {})))
+  print("Emergency buttons: " .. tostring(#(summary.emergencyButtons or {})))
+end
+
+function kioskPrintPeripheralSummary(items)
+  printPeripheralSummary(items)
+end
+
+function kioskSetupAddDoor(serverId, token)
+  local controller = kioskPromptLine("Controller id blank/server=server", "server")
+  local payload = {
+    action = "add_door",
+    id = kioskPromptLine("Door id", nil),
+    label = kioskPromptLine("Door label", nil),
+    controller = controller,
+    output = kioskEndpointPrompt("Output endpoint", "front", controller),
+    activeOpen = kioskPromptBool("Output active opens door", true),
+    openSeconds = kioskPromptNumber("Open seconds", config.defaultOpenSeconds or 4),
+    alarmOnDenied = kioskPromptBool("Alarm on denied attempts", true),
+  }
+  if kioskPromptBool("Add forced-open contact", false) then
+    payload.contact = kioskEndpointPrompt("Contact endpoint", "back", controller)
+    payload.contactOpenWhen = kioskPromptBool("Contact active means open", true)
+  end
+  if kioskPromptBool("Add request-to-exit", false) then
+    payload.requestExit = kioskEndpointPrompt("Exit button endpoint", "right", controller)
+    payload.exitActiveWhen = kioskPromptBool("Exit active when pressed", true)
+  end
+  payload.reader = kioskPromptLine("Reader source blank=skip", "")
+
+  local reply = kioskSetupRequest(serverId, token, payload)
+  print(reply.ok and tostring(reply.message or "Saved.") or ("Denied/failed: " .. tostring(reply.error)))
+  pause()
+end
+
+function kioskSetupAddSensor(serverId, token)
+  print("Sensor type: 1 redstone  2 Create stress  3 generic peripheral")
+  local choice = kioskPromptLine("Type", "1")
+  local payload = {
+    action = "add_sensor",
+    name = kioskPromptLine("Sensor name", "Facility Sensor"),
+    profile = kioskPromptLine("Alarm profile", "facility_fault"),
+  }
+  if choice == "2" then
+    payload.sensorType = "create_stress"
+    payload.peripheral = kioskPromptLine("Stress peripheral", "")
+    payload.maxLoad = kioskPromptNumber("Max load", 0.9)
+    payload.profile = kioskPromptLine("Alarm profile", "power_fault")
+  elseif choice == "3" then
+    payload.sensorType = "peripheral"
+    payload.peripheral = kioskPromptLine("Peripheral", "")
+    payload.method = kioskPromptLine("Method", "")
+    payload.field = kioskPromptLine("Table field blank=whole value", "")
+    payload.max = kioskPromptNumber("Alarm above blank=none", nil)
+    payload.min = kioskPromptNumber("Alarm below blank=none", nil)
+  else
+    payload.sensorType = "redstone"
+    payload.controller = kioskPromptLine("Controller id blank/server=server", "server")
+    payload.input = kioskEndpointPrompt("Input endpoint", "left", payload.controller)
+    payload.alarmWhen = kioskPromptBool("Active means fault", true)
+  end
+
+  local reply = kioskSetupRequest(serverId, token, payload)
+  print(reply.ok and tostring(reply.message or "Saved.") or ("Denied/failed: " .. tostring(reply.error)))
+  pause()
+end
+
+function kioskSetupAddEmergency(serverId, token)
+  local controller = kioskPromptLine("Controller id blank/server=server", "server")
+  local payload = {
+    action = "add_emergency",
+    name = kioskPromptLine("Button name", "Emergency Button"),
+    controller = controller,
+    input = kioskEndpointPrompt("Input endpoint", "top", controller),
+    activeWhen = kioskPromptBool("Active means pressed", true),
+    profile = kioskPromptLine("Alarm profile", "emergency"),
+    reason = kioskPromptLine("Alarm reason", "emergency button"),
+  }
+  local reply = kioskSetupRequest(serverId, token, payload)
+  print(reply.ok and tostring(reply.message or "Saved.") or ("Denied/failed: " .. tostring(reply.error)))
+  pause()
+end
+
+function kioskSetupMapReader(serverId, token)
+  local reply = kioskSetupRequest(serverId, token, {
+    action = "map_reader",
+    source = kioskPromptLine("Reader source", ""),
+    door = kioskPromptLine("Door id", ""),
+  })
+  print(reply.ok and tostring(reply.message or "Saved.") or ("Denied/failed: " .. tostring(reply.error)))
+  pause()
+end
+
+function kioskSetupMenu(serverId, brand, token, user)
+  while true do
+    drawKioskHeader(brand, user)
+    print("Facility Setup")
+    print("1. Summary")
+    print("2. Scan server peripherals")
+    print("3. Scan door controller")
+    print("4. Add/update door")
+    print("5. Add facility sensor")
+    print("6. Add emergency button")
+    print("7. Map reader to door")
+    print("B. Back")
+
+    local choice = string.lower(kioskRead("> "))
+    if choice == "1" then
+      local reply = kioskSetupRequest(serverId, token, { action = "summary" })
+      if reply.ok then
+        kioskPrintSetupSummary(reply.summary or {})
+      else
+        print("Unavailable: " .. tostring(reply.error))
+      end
+      pause()
+    elseif choice == "2" then
+      local reply = kioskSetupRequest(serverId, token, { action = "scan", controller = "server" })
+      if reply.ok then
+        kioskPrintPeripheralSummary((reply.scan or {}).peripherals or {})
+      else
+        print("Scan failed: " .. tostring(reply.error))
+      end
+      pause()
+    elseif choice == "3" then
+      local controller = kioskPromptLine("Controller computer id", "")
+      local reply = kioskSetupRequest(serverId, token, { action = "scan", controller = controller })
+      if reply.ok then
+        print("Controller: " .. tostring((reply.scan or {}).controllerId or controller))
+        kioskPrintPeripheralSummary((reply.scan or {}).peripherals or {})
+      else
+        print("Scan failed: " .. tostring(reply.error))
+      end
+      pause()
+    elseif choice == "4" then
+      kioskSetupAddDoor(serverId, token)
+    elseif choice == "5" then
+      kioskSetupAddSensor(serverId, token)
+    elseif choice == "6" then
+      kioskSetupAddEmergency(serverId, token)
+    elseif choice == "7" then
+      kioskSetupMapReader(serverId, token)
+    elseif choice == "b" then
+      return true
+    end
+  end
+end
+
 function requestKioskQuit(serverId, token)
   local reply = kioskRequest(serverId, "kiosk_security_action", {
     token = token,
@@ -4444,6 +5583,8 @@ function kioskMenu(serverId, brand, token, user)
     brand = state.kiosk.branding or brand or {}
     local quitClearance = brand.permissions and tonumber(brand.permissions.quitKiosk) or tonumber(config.kiosk and config.kiosk.quitClearance) or 5
     local canQuitKiosk = quitClearance == nil or (tonumber(user.clearance) or 0) >= quitClearance
+    local setupClearance = brand.permissions and tonumber(brand.permissions.setupFacility) or 5
+    local canSetup = setupClearance == nil or (tonumber(user.clearance) or 0) >= setupClearance
     print("1. Personal notes")
     print("2. Facility feed")
     print("3. Messages")
@@ -4452,6 +5593,9 @@ function kioskMenu(serverId, brand, token, user)
     print("6. Security actions")
     print("7. Facility logs")
     print("8. Notifications")
+    if canSetup then
+      print("9. Facility setup")
+    end
     if canQuitKiosk then
       print("Q. Quit kiosk")
     end
@@ -4488,6 +5632,10 @@ function kioskMenu(serverId, brand, token, user)
       end
     elseif choice == "8" then
       kioskNotificationCenter(brand, user)
+    elseif choice == "9" and canSetup then
+      if not kioskSetupMenu(serverId, brand, token, user) then
+        return "logout"
+      end
     elseif choice == "q" and canQuitKiosk then
       if requestKioskQuit(serverId, token) then
         return "quit"
@@ -4515,17 +5663,45 @@ function kioskUiLoop()
       elseif action ~= "retry" and token and user then
         state.kiosk.token = token
         state.kiosk.user = user
-        local menuResult = kioskMenu(serverId, brand, token, user)
+        touchKioskActivity()
+        local okMenu, menuResult = pcall(kioskMenu, serverId, brand, token, user)
+        if not okMenu then
+          if menuResult == kioskAutoLogoutSignal() then
+            kioskRequest(serverId, "kiosk_logout", { token = token }, 2)
+            menuResult = "logout"
+          else
+            error(menuResult)
+          end
+        end
         state.kiosk.token = nil
         state.kiosk.user = nil
+        state.kiosk.loggedOutSince = os.clock()
         if menuResult == "quit" then
           return
         end
       else
         state.kiosk.token = nil
         state.kiosk.user = nil
+        state.kiosk.loggedOutSince = os.clock()
       end
     end
+  end
+end
+
+function kioskMaintenanceLoop()
+  state.kiosk.loggedOutSince = state.kiosk.loggedOutSince or os.clock()
+  while state.kiosk.running do
+    local rebootSeconds = tonumber(config.kiosk and config.kiosk.autoRebootLoggedOutSeconds) or 0
+    if rebootSeconds > 0 and not state.kiosk.user then
+      state.kiosk.loggedOutSince = state.kiosk.loggedOutSince or os.clock()
+      if os.clock() - state.kiosk.loggedOutSince >= rebootSeconds then
+        os.reboot()
+      end
+    elseif state.kiosk.user then
+      state.kiosk.loggedOutSince = nil
+    end
+
+    sleep(5)
   end
 end
 
@@ -4542,11 +5718,13 @@ function kioskMain()
   end
   state.kiosk.running = true
   state.kiosk.netLoop = true
+  state.kiosk.loggedOutSince = os.clock()
+  touchKioskActivity()
   openRednet()
   drawMonitors(true)
 
   local ok, err = pcall(function()
-    parallel.waitForAny(kioskUiLoop, kioskNetworkLoop, kioskAlarmSpeakerLoop, kioskMonitorLoop)
+    parallel.waitForAny(kioskUiLoop, kioskNetworkLoop, kioskAlarmSpeakerLoop, kioskMonitorLoop, kioskMaintenanceLoop)
   end)
 
   state.kiosk.running = false
@@ -4555,6 +5733,53 @@ function kioskMain()
   os.pullEvent = originalPullEvent
   if not ok then
     error(err)
+  end
+end
+
+function controllerMain()
+  config = loadConfig()
+  config.mode = "controller"
+  math.randomseed(nowMillis() % 2147483647)
+  openRednet()
+  clearScreen()
+  print("Security door controller")
+  print("Computer id: " .. tostring(localComputerId() or "?"))
+  print("Server id: " .. tostring(config.rednet and config.rednet.serverId or "broadcast"))
+  print("Waiting for server endpoint requests.")
+  broadcastControllerHello()
+  local helloTimer = os.startTimer(30)
+
+  while true do
+    local event = { os.pullEventRaw() }
+    local name = event[1]
+    if name == "terminate" then
+      return
+    elseif name == "timer" and event[2] == helloTimer then
+      broadcastControllerHello()
+      helloTimer = os.startTimer(30)
+    elseif name == "peripheral" or name == "peripheral_detach" then
+      openRednet()
+      broadcastControllerHello()
+    elseif name == "rednet_message" then
+      local sender = event[2]
+      local message = event[3]
+      local protocol = event[4]
+      if protocol == rednetProtocol() then
+        local decoded, decodeErr = unwrapRednetMessage(message)
+        if decoded ~= nil then
+          message = decoded
+        elseif secureRednet.enabled(config.rednet) then
+          message = nil
+        elseif decodeErr then
+          message = nil
+        end
+        if type(message) == "string" then
+          local ok, value = pcall(textutils.unserialize, message)
+          message = ok and value or { op = message }
+        end
+        handleControllerMessage(sender, message)
+      end
+    end
   end
 end
 
@@ -4581,6 +5806,7 @@ function eventLoop()
   scheduleTimer(config.pollSeconds or 1, { type = "poll" })
   scheduleTimer((config.monitors and config.monitors.refreshSeconds) or 2, { type = "monitor" })
   scheduleTimer(tonumber(config.kiosk and config.kiosk.syncSeconds) or 2, { type = "alarm_broadcast" })
+  scheduleAnnouncementTimer()
 
   while state.running do
     local event = { os.pullEventRaw() }
@@ -4607,6 +5833,12 @@ function eventLoop()
         elseif payload.type == "alarm_broadcast" then
           broadcastAlarmState()
           scheduleTimer(tonumber(config.kiosk and config.kiosk.syncSeconds) or 2, { type = "alarm_broadcast" })
+        elseif payload.type == "announcement" then
+          local text, voiceLine = nextConfiguredAnnouncement()
+          if text then
+            broadcastAnnouncement(text, "auto", voiceLine)
+          end
+          scheduleAnnouncementTimer()
         elseif payload.type == "alarm_pulse" then
           if state.alarm.active then
             playAlarmPulse()
@@ -4675,6 +5907,10 @@ function main()
     kioskMain()
     return
   end
+  if requestedMode == "controller" or requestedMode == "door" or requestedMode == "door_controller" then
+    controllerMain()
+    return
+  end
 
   config = loadConfig()
   if requestedMode and requestedMode ~= "" then
@@ -4683,8 +5919,13 @@ function main()
 
   math.randomseed(nowMillis() % 2147483647)
 
-  if string.lower(tostring(config.mode or "server")) == "kiosk" then
+  local configMode = string.lower(tostring(config.mode or "server"))
+  if configMode == "kiosk" then
     kioskMain()
+    return
+  end
+  if configMode == "controller" or configMode == "door" or configMode == "door_controller" then
+    controllerMain()
     return
   end
 
