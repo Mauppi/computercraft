@@ -331,7 +331,7 @@ return {
       },
       emergency = {
         label = "Emergency Alarm",
-        repeatSeconds = 0.9,
+        repeatSeconds = 7.1,
         sounds = {
         },
       },
