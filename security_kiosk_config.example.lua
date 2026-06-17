@@ -15,8 +15,8 @@ return {
     discoverySeconds = 3,
     encryption = {
       -- Must match the main server when enabled.
-      enabled = false,
-      key = "change-this-facility-key",
+      enabled = true,
+      key = "FAPKEY",
       allowPlaintext = false,
     },
   },
@@ -55,11 +55,11 @@ return {
     sounds = {
       social = {
         -- { wav = "notifications/social.wav", volume = 0.8 },
-        { name = "minecraft:block.note_block.chime", volume = 1.0, pitch = 1.2 },
+        { wav = "announcements/jingle_notification.wav", volume = 0.8 },
       },
       dm = {
         -- { wav = "notifications/dm.wav", volume = 0.9 },
-        { name = "minecraft:block.note_block.bell", volume = 1.3, pitch = 1.6 },
+        { wav = "announcements/jingle_notification.wav", volume = 0.8 },
       },
     },
   },
