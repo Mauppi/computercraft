@@ -276,7 +276,7 @@ return {
   },
 
   alarm = {
-    repeatSeconds = 7.1,
+    repeatSeconds = 1.25,
     deniedBeforeAlarm = 3,
     chat = true,
     sampleRate = 48000,
@@ -289,7 +289,7 @@ return {
     -- speaker.playAudio before generated DSP fallback is used.
     sounds = {
       -- { wav = "announcements/red_alert.wav", volume = 1.2 },
-      { files = { "announcements/red_alert_a.wav", "announcements/red_alert_b.wav" }, volume = 1.2 },
+      { files = { "announcements/red_alert_a.wav", "announcements/red_alert_a.wav", "announcements/red_alert_a.wav", "announcements/red_alert_b.wav", "announcements/red_alert_b.wav", "announcements/red_alert_b.wav" }, volume = 1.2 },
       -- { pcm = { 0, 28, 56, 28, 0, -28, -56, -28 }, volume = 1.0 },
       -- { name = "minecraft:block.note_block.pling", volume = 3, pitch = 0.6 },
       -- { name = "minecraft:block.note_block.bell", volume = 3, pitch = 1.8 },
@@ -420,7 +420,7 @@ return {
       -- Optional request-to-exit button or pressure plate.
       requestExit = { side = "right", activeWhen = true },
 
-      alarmOnDenied = true,
+      alarmOnDenied = false,
       deniedBeforeAlarm = 3,
     },
 
