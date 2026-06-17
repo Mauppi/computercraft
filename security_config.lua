@@ -203,6 +203,7 @@ return {
       { voiceLine = "slopday" },
       { voiceLine = "slopday_cancelled" },
       { voiceLine = "slopday_slop" },
+      { voiceLine = "slopday_nonono" },
     },
     eventAnnouncements = true,
     events = {
@@ -313,10 +314,10 @@ return {
       lockdown_clear = { files = { "announcements/vo_lockdown.wav", "announcements/vo_disengaged.wav" } },
       alarm = { files = { "announcements/vo_alarm.wav", "announcements/vo_engaged.wav" } },
       alarm_clear = { files = { "announcements/vo_alarm.wav", "announcements/vo_disengaged.wav" } },
-      slopday = { files = { "announcements/slop day.wav" } },
-      slopday_cancelled = { files = { "announcements/slop day cancelled.wav" } },
-      slopday_slop = { files = { "announcements/slop day slop.wav" } },
-      -- short = { pcm = { 0, 12, 24, 12, 0, -12, -24, -12 } },
+      slopday = { files = { "announcements/slopday.wav" } },
+      slopday_cancelled = { files = { "announcements/slopdaycancelled.wav" } },
+      slopday_slop = { files = { "announcements/slopdayslop.wav" } },
+      slopday_slop = { files = { "announcements/slopdaynonono.wav" } },
     },
     jingles = {
       announcement = {
