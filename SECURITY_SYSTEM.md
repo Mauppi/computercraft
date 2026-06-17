@@ -43,7 +43,7 @@ Employees can sign in, edit personal notes, read/post to the facility feed, send
 
 `startup_auto_update.lua` fetches `security_system_manifest.lua` from `https://raw.githubusercontent.com/Mauppi/computercraft/master/security_system_manifest.lua`, then downloads every listed app file from the manifest's `baseUrl`. The required files are `security_system_defaults.lua`, `security_system_rednet.lua`, `security_system_notifications.lua`, `security_system_announcements.lua`, `security_system_app.lua`, and `security_system.lua`; the manifest can also keep startup scripts, examples, docs, and WAV assets synced. Its default after-update behavior is `run` for server mode and `reboot` for kiosk mode. HTTP must be enabled in the CC:Tweaked server config.
 
-For kiosk mode, `startup_auto_update.lua` also asks the main security server for a kiosk config using Rednet op `kiosk_config`. The server returns branding, kiosk settings, Rednet settings, monitor config, notifications, and announcements. If the synced config changes, the updater treats it like an update and follows the kiosk after-update action, which defaults to reboot. After config sync, the updater scans `announcements` and `notifications` for every `.wav` path in voice lines, jingles, and notification sounds, downloads those files in binary mode from the manifest `baseUrl`, `announcements.assetBaseUrl`, or `notifications.assetBaseUrl`, and validates that each downloaded clip is a WAV file.
+For kiosk mode, `startup_auto_update.lua` also asks the main security server for a kiosk config using Rednet op `kiosk_config`. The server returns branding, kiosk settings, Rednet settings, monitor config, notifications, announcements, and alarm audio settings. If the synced config changes, the updater treats it like an update and follows the kiosk after-update action, which defaults to reboot. After config sync, the updater scans `announcements`, `notifications`, and `alarm` for every `.wav` path in voice lines, jingles, notification sounds, and alarm sounds, downloads those files in binary mode from the manifest `baseUrl`, `announcements.assetBaseUrl`, `notifications.assetBaseUrl`, or `alarm.assetBaseUrl`, and validates that each downloaded clip is a WAV file.
 
 Locked kiosks do not expose a Quit option and disable normal Ctrl+T termination in kiosk mode. Set `kiosk.locked = false` only for development computers.
 Logged-in employees can quit kiosk mode only if the server approves the `quitKiosk` permission. `kiosk.quitClearance` is only a local display fallback; server permissions remain authoritative.
@@ -223,6 +223,21 @@ Committed audio can also be listed explicitly in `security_system_manifest.lua` 
 ## Alarm Audio And Emergency Buttons
 
 Speakers use generated PCM/DSP alarm pulses through `speaker.playAudio` when available, with Minecraft sound fallback. The default DSP profiles use low dissonant tones, sub harmonics, detune, pulsing, sample crush, tremolo, and grit for a more menacing alarm sound. Configure or disable this under `alarm.dsp`.
+
+Alarm loop entries under `alarm.sounds` can also be WAV files, stitched WAV segments, or raw PCM sample tables. When a selected loop entry has `wav`, `files`, or `pcm`, it plays through `speaker.playAudio` before generated DSP fallback is used. The alarm timer keeps rotating through `alarm.sounds` at `alarm.repeatSeconds` or the active profile's `repeatSeconds`.
+
+```lua
+alarm = {
+  sampleRate = 48000,
+  maxSamples = 128000,
+  syncAssets = true,
+  sounds = {
+    { wav = "alarms/security_loop.wav", volume = 1.2 },
+    { files = { "alarms/klaxon_a.wav", "alarms/klaxon_b.wav" }, volume = 1.2 },
+    { pcm = { 0, 28, 56, 28, 0, -28, -56, -28 }, volume = 1.0 },
+  },
+}
+```
 
 Lockdown changes also send kiosk notifications. Configure their speaker alerts under `notifications.sounds.lockdown` and `notifications.sounds.lockdown_clear`.
 

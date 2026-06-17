@@ -14,6 +14,7 @@ return {
     -- { path = "announcements/badge_notice.wav", binary = true, kind = "wav" },
     -- { path = "notifications/dm.wav", binary = true, kind = "wav" },
     -- { path = "notifications/social.wav", binary = true, kind = "wav" },
+    -- { path = "alarms/security_loop.wav", binary = true, kind = "wav" },
   },
 
   files = {
@@ -78,6 +79,8 @@ return {
         "kioskLocalControllerLoop",
         "kiosk.controller",
         "remove_door",
+        "playAlarmAudioSound",
+        "includeAlarm",
         "function main()",
         "return {",
       },

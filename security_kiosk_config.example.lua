@@ -21,6 +21,11 @@ return {
     },
   },
 
+  configSync = {
+    enabled = true,
+    includeAlarm = true,
+  },
+
   kiosk = {
     locked = true,
     syncSeconds = 2,

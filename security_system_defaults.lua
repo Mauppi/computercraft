@@ -46,6 +46,7 @@ return {
     allowKioskPull = true,
     includeMonitors = true,
     includeAnnouncements = true,
+    includeAlarm = true,
   },
 
   employees = {
@@ -288,7 +289,15 @@ return {
     repeatSeconds = 1.5,
     deniedBeforeAlarm = 3,
     chat = true,
+    sampleRate = 48000,
+    maxSamples = 128000,
+    syncAssets = true,
+    assetsRequired = false,
+    -- assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
     sounds = {
+      -- { wav = "alarms/security_loop.wav", volume = 1.2 },
+      -- { files = { "alarms/security_1.wav", "alarms/security_2.wav" }, volume = 1.2 },
+      -- { pcm = { 0, 28, 56, 28, 0, -28, -56, -28 }, volume = 1.0 },
       { name = "minecraft:block.note_block.pling", volume = 3, pitch = 0.6 },
       { name = "minecraft:block.note_block.bell", volume = 3, pitch = 1.8 },
     },

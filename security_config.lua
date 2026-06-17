@@ -47,6 +47,7 @@ return {
     allowKioskPull = true,
     includeMonitors = true,
     includeAnnouncements = true,
+    includeAlarm = true,
   },
 
   employees = {
@@ -278,11 +279,20 @@ return {
     repeatSeconds = 1.5,
     deniedBeforeAlarm = 3,
     chat = true,
+    sampleRate = 48000,
+    maxSamples = 128000,
+    syncAssets = true,
+    assetsRequired = true,
+    assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
 
-    -- Speakers are discovered automatically.
+    -- Speakers are discovered automatically. WAV/PCM entries loop through
+    -- speaker.playAudio before generated DSP fallback is used.
     sounds = {
-      { name = "minecraft:block.note_block.pling", volume = 3, pitch = 0.6 },
-      { name = "minecraft:block.note_block.bell", volume = 3, pitch = 1.8 },
+      { wav = "announcements/red_alert.wav", volume = 1.2 },
+      -- { files = { "announcements/red_alert.wav", "announcements/jingle_alarm.wav" }, volume = 1.2 },
+      -- { pcm = { 0, 28, 56, 28, 0, -28, -56, -28 }, volume = 1.0 },
+      -- { name = "minecraft:block.note_block.pling", volume = 3, pitch = 0.6 },
+      -- { name = "minecraft:block.note_block.bell", volume = 3, pitch = 1.8 },
     },
 
     -- Uses speaker.playAudio when available. Existing Minecraft sounds remain
@@ -309,8 +319,6 @@ return {
       power_fault = {
         label = "Power Fault",
         sounds = {
-          { name = "minecraft:block.note_block.bass", volume = 3, pitch = 0.7 },
-          { name = "minecraft:block.note_block.pling", volume = 3, pitch = 1.2 },
         },
         outputs = {
           { side = "top" },
@@ -319,16 +327,12 @@ return {
       facility_fault = {
         label = "Facility Fault",
         sounds = {
-          { name = "minecraft:block.note_block.bit", volume = 3, pitch = 0.8 },
-          { name = "minecraft:block.note_block.bit", volume = 3, pitch = 1.6 },
         },
       },
       emergency = {
         label = "Emergency Alarm",
         repeatSeconds = 0.9,
         sounds = {
-          { name = "minecraft:block.note_block.bell", volume = 3, pitch = 2.0 },
-          { name = "minecraft:block.note_block.pling", volume = 3, pitch = 0.5 },
         },
       },
     },

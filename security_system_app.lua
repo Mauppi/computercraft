@@ -71,6 +71,7 @@ local state = {
     profile = nil,
     since = nil,
     soundIndex = 1,
+    audioCache = {},
   },
   lockdown = false,
   consoleAdminUntil = 0,
@@ -957,6 +958,10 @@ function alarmProfile(profileName)
     repeatSeconds = profile.repeatSeconds or alarm.repeatSeconds or 1.5,
     sounds = profile.sounds or alarm.sounds or {},
     dsp = profile.dsp or alarm.dsp,
+    audio = profile.audio or alarm.audio,
+    sampleRate = profile.sampleRate or alarm.sampleRate,
+    maxSamples = profile.maxSamples or alarm.maxSamples,
+    volume = profile.volume or alarm.volume,
     outputs = profile.outputs or profile.output or alarm.outputs or alarm.output,
   }
 end
@@ -1217,6 +1222,124 @@ function buildDspAlarmBuffer(profile)
   return buffer
 end
 
+function alarmIsWavPath(path)
+  return string.sub(string.lower(tostring(path or "")), -4) == ".wav"
+end
+
+function alarmAudioConfig(profile)
+  local audio = type(profile.audio) == "table" and profile.audio or {}
+  local dsp = profile.dsp or {}
+  return {
+    sampleRate = audio.sampleRate or profile.sampleRate or dsp.sampleRate or 48000,
+    maxSamples = audio.maxSamples or profile.maxSamples or dsp.maxSamples or 128000,
+  }
+end
+
+function alarmSoundPath(sound)
+  if type(sound) == "string" then
+    return alarmIsWavPath(sound) and sound or nil
+  end
+  if type(sound) ~= "table" then
+    return nil
+  end
+  return sound.wav or sound.file or sound.path
+end
+
+function appendAlarmSamples(buffer, samples)
+  if type(samples) ~= "table" then
+    return
+  end
+  for index = 1, #samples do
+    buffer[#buffer + 1] = clampSample(samples[index])
+  end
+end
+
+function loadAlarmWav(path, audioConfig)
+  path = tostring(path or "")
+  if path == "" or not (facilityAnnouncements and facilityAnnouncements.loadWav) then
+    return nil
+  end
+
+  state.alarm.audioCache = state.alarm.audioCache or {}
+  local cacheKey = path .. "|" .. tostring(audioConfig and audioConfig.sampleRate or "")
+  if state.alarm.audioCache[cacheKey] == false then
+    return nil
+  end
+  if state.alarm.audioCache[cacheKey] then
+    return state.alarm.audioCache[cacheKey]
+  end
+
+  local ok, samples = pcall(facilityAnnouncements.loadWav, path, audioConfig)
+  if ok and type(samples) == "table" and #samples > 0 then
+    state.alarm.audioCache[cacheKey] = samples
+    return samples
+  end
+  state.alarm.audioCache[cacheKey] = false
+  return nil
+end
+
+function buildAlarmSoundBuffer(profile, sound)
+  if type(sound) ~= "table" then
+    local path = alarmSoundPath(sound)
+    if path then
+      return loadAlarmWav(path, alarmAudioConfig(profile))
+    end
+    return nil
+  end
+
+  if type(sound.pcm) == "table" then
+    local buffer = {}
+    appendAlarmSamples(buffer, sound.pcm)
+    return buffer
+  end
+
+  local audioConfig = alarmAudioConfig(profile)
+  local buffer = {}
+  if type(sound.files) == "table" then
+    for _, path in ipairs(sound.files) do
+      appendAlarmSamples(buffer, loadAlarmWav(path, audioConfig))
+    end
+  else
+    appendAlarmSamples(buffer, loadAlarmWav(alarmSoundPath(sound), audioConfig))
+  end
+
+  if #buffer > 0 then
+    return buffer
+  end
+  return nil
+end
+
+function playAlarmBuffer(profile, speaker, pcm, volume)
+  if not (speaker and speaker.playAudio and type(pcm) == "table" and #pcm > 0) then
+    return false
+  end
+
+  local audioConfig = alarmAudioConfig(profile)
+  local maxSamples = tonumber(audioConfig.maxSamples) or 128000
+  if maxSamples <= 0 or #pcm <= maxSamples then
+    local ok, accepted = pcall(speaker.playAudio, pcm, volume)
+    return ok and accepted ~= false
+  end
+
+  local chunk = {}
+  for index = 1, maxSamples do
+    chunk[index] = clampSample(pcm[index])
+  end
+  local ok, accepted = pcall(speaker.playAudio, chunk, volume)
+  return ok and accepted ~= false
+end
+
+function playAlarmAudioSound(profile, sound, speaker)
+  local buffer = buildAlarmSoundBuffer(profile, sound)
+  if not buffer then
+    return false
+  end
+
+  local dsp = profile.dsp or {}
+  local volume = type(sound) == "table" and sound.volume or nil
+  return playAlarmBuffer(profile, speaker, buffer, tonumber(volume) or tonumber(profile.volume) or tonumber(dsp.volume) or 1)
+end
+
 function playDspAlarm(profile, speaker)
   if not (speaker and speaker.playAudio) then
     return false
@@ -1232,6 +1355,39 @@ function playDspAlarm(profile, speaker)
   return ok and accepted ~= false
 end
 
+function playMinecraftAlarmSound(speaker, sound)
+  if type(sound) == "string" then
+    if alarmIsWavPath(sound) then
+      return false
+    end
+    if speaker.playSound then
+      local ok = pcall(speaker.playSound, sound, 2, 1)
+      return ok
+    end
+    return false
+  end
+
+  if type(sound) ~= "table" then
+    return false
+  end
+  if sound.name and speaker.playSound then
+    local ok = pcall(speaker.playSound, sound.name, sound.volume or 2, sound.pitch or 1)
+    return ok
+  end
+  if sound.note and speaker.playNote then
+    local ok = pcall(speaker.playNote, sound.note, sound.volume or 2, sound.pitch or 1)
+    return ok
+  end
+  return false
+end
+
+function alarmSoundValue(sound, key, fallback)
+  if type(sound) == "table" and sound[key] ~= nil then
+    return sound[key]
+  end
+  return fallback
+end
+
 function playAlarmPulse()
   local profile = alarmProfile(state.alarm.profile)
   local sounds = profile.sounds or {}
@@ -1242,11 +1398,15 @@ function playAlarmPulse()
   end
 
   for _, speaker in ipairs(findSpeakers()) do
-    local played = playDspAlarm(profile, speaker)
-    if (not played) and sound and speaker.playSound then
-      pcall(speaker.playSound, sound.name, sound.volume or 2, sound.pitch or 1)
-    elseif (not played) and speaker.playNote then
-      pcall(speaker.playNote, "pling", sound and sound.volume or 2, sound and sound.pitch or 1)
+    local played = playAlarmAudioSound(profile, sound, speaker)
+    if not played then
+      played = playDspAlarm(profile, speaker)
+    end
+    if not played then
+      played = playMinecraftAlarmSound(speaker, sound)
+    end
+    if (not played) and speaker.playNote then
+      pcall(speaker.playNote, "pling", alarmSoundValue(sound, "volume", 2), alarmSoundValue(sound, "pitch", 1))
     end
   end
 end
@@ -2713,6 +2873,9 @@ function publicKioskConfig()
   end
   if not config.configSync or config.configSync.includeAnnouncements ~= false then
     out.announcements = shallowCopy(config.announcements or {})
+  end
+  if not config.configSync or config.configSync.includeAlarm ~= false then
+    out.alarm = shallowCopy(config.alarm or {})
   end
 
   return out

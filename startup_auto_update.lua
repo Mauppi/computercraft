@@ -61,7 +61,7 @@ local FALLBACK_MANIFEST = {
       path = APP_MODULE_FILE,
       required = true,
       minSize = 2000,
-      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "function main()", "return {" },
+      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "includeAlarm", "function main()", "return {" },
     },
     {
       path = PROGRAM,
@@ -137,7 +137,7 @@ local function copyKioskConfigIfMissing(mode)
   handle.writeLine("return {")
   handle.writeLine("  mode = \"kiosk\",")
   handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },")
-  handle.writeLine("  configSync = { enabled = true },")
+  handle.writeLine("  configSync = { enabled = true, includeAlarm = true },")
   handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
   handle.writeLine("  announcements = { enabled = true, sound = true, voice = true, volume = 1, sampleRate = 48000, maxSamples = 128000, syncAssets = true, assetsRequired = false },")
@@ -573,7 +573,7 @@ local function collectWavPaths(value, paths, seen, key)
   end
 end
 
-local function configuredWavFiles(configTable, includeAnnouncements, includeNotifications)
+local function configuredWavFiles(configTable, includeAnnouncements, includeNotifications, includeAlarm)
   local paths = {}
   local seen = {}
   if includeAnnouncements ~= false then
@@ -582,6 +582,9 @@ local function configuredWavFiles(configTable, includeAnnouncements, includeNoti
   if includeNotifications ~= false then
     collectWavPaths(configTable and configTable.notifications, paths, seen)
   end
+  if includeAlarm ~= false then
+    collectWavPaths(configTable and configTable.alarm, paths, seen)
+  end
   return paths
 end
 
@@ -589,20 +592,22 @@ local function fetchConfiguredWavs()
   local current = loadConfigTable()
   local announcements = current.announcements or {}
   local notifications = current.notifications or {}
+  local alarm = current.alarm or {}
   local syncAnnouncements = announcements.syncAssets ~= false
   local syncNotifications = notifications.syncAssets ~= false
-  if not syncAnnouncements and not syncNotifications then
+  local syncAlarm = alarm.syncAssets ~= false
+  if not syncAnnouncements and not syncNotifications and not syncAlarm then
     return true, "configured wav sync disabled", false
   end
 
-  local wavs = configuredWavFiles(current, syncAnnouncements, syncNotifications)
+  local wavs = configuredWavFiles(current, syncAnnouncements, syncNotifications, syncAlarm)
   if #wavs == 0 then
     return true, "no configured wav assets", false
   end
 
   local manifest = fetchManifest()
-  local baseUrl = notifications.assetBaseUrl or announcements.assetBaseUrl or (manifest and manifest.baseUrl) or DEFAULT_BASE_URL
-  local required = notifications.assetsRequired == true or announcements.assetsRequired == true
+  local baseUrl = alarm.assetBaseUrl or notifications.assetBaseUrl or announcements.assetBaseUrl or (manifest and manifest.baseUrl) or DEFAULT_BASE_URL
+  local required = alarm.assetsRequired == true or notifications.assetsRequired == true or announcements.assetsRequired == true
   local updated = false
   local updatedCount = 0
   local skipped = 0
