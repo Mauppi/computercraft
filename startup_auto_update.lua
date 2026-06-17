@@ -20,7 +20,7 @@ local startupArgs = { ... }
 
 -- Set this to "server" or "kiosk" to force a mode. Leave nil to read
 -- security_config.lua, falling back to server mode.
-local MODE_OVERRIDE = startupArgs[1] and string.lower(tostring(startupArgs[1])) or nil
+local MODE_OVERRIDE = nil
 
 -- After a successful update:
 --   "run"      starts the security program immediately.
