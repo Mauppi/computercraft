@@ -94,6 +94,8 @@ return {
         "kiosk.controller",
         "remove_door",
         "playAlarmAudioSound",
+        "alarmAudioStreamLoop",
+        "speaker_audio_empty",
         "includeAlarm",
         "function main()",
         "return {",

@@ -228,12 +228,13 @@ Committed audio can also be listed explicitly in `security_system_manifest.lua` 
 
 Speakers use generated PCM/DSP alarm pulses through `speaker.playAudio` when available, with Minecraft sound fallback. The default DSP profiles use low dissonant tones, sub harmonics, detune, pulsing, sample crush, tremolo, and grit for a more menacing alarm sound. Configure or disable this under `alarm.dsp`.
 
-Alarm loop entries under `alarm.sounds` can also be WAV files, stitched WAV segments, or raw PCM sample tables. When a selected loop entry has `wav`, `files`, or `pcm`, it plays through `speaker.playAudio` before generated DSP fallback is used. The alarm timer keeps rotating through `alarm.sounds` at `alarm.repeatSeconds` or the active profile's `repeatSeconds`.
+Alarm loop entries under `alarm.sounds` can also be WAV files, stitched WAV segments, or raw PCM sample tables. When a selected loop entry has `wav`, `files`, or `pcm`, it streams through `speaker.playAudio` in chunks and waits for the full clip to finish before looping or rotating to the next alarm sound. `alarm.audio.chunkSamples` controls each speaker buffer packet, default `128000`, and `alarm.audio.loopGapSeconds` controls the gap between completed loops.
 
 ```lua
 alarm = {
   sampleRate = 48000,
   maxSamples = 128000,
+  audio = { chunkSamples = 128000, loopGapSeconds = 0.05 },
   syncAssets = true,
   sounds = {
     { wav = "alarms/security_loop.wav", volume = 1.2 },

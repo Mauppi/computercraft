@@ -282,6 +282,10 @@ return {
     chat = true,
     sampleRate = 48000,
     maxSamples = 128000,
+    audio = {
+      chunkSamples = 128000,
+      loopGapSeconds = 0.05,
+    },
     syncAssets = true,
     assetsRequired = true,
     assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",

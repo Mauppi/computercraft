@@ -75,6 +75,9 @@ local state = {
     since = nil,
     soundIndex = 1,
     audioCache = {},
+    audioStreams = {},
+    audioGeneration = 0,
+    audioPlayingUntil = 0,
   },
   lockdown = false,
   consoleAdminUntil = 0,
@@ -1062,6 +1065,19 @@ function findSpeakers()
   return out
 end
 
+function findSpeakerEntries()
+  local out = {}
+  for _, name in ipairs(peripheral.getNames()) do
+    if hasPeripheralType(name, "speaker") then
+      local device = peripheral.wrap(name)
+      if device then
+        table.insert(out, { name = name, speaker = device })
+      end
+    end
+  end
+  return out
+end
+
 function findChatBox()
   for _, name in ipairs(peripheral.getNames()) do
     local methods = methodMap(name)
@@ -1363,6 +1379,8 @@ function alarmAudioConfig(profile)
   return {
     sampleRate = audio.sampleRate or profile.sampleRate or dsp.sampleRate or 48000,
     maxSamples = audio.maxSamples or profile.maxSamples or dsp.maxSamples or 128000,
+    chunkSamples = audio.chunkSamples or profile.chunkSamples or audio.playbackSamples or profile.playbackSamples or 128000,
+    loopGapSeconds = audio.loopGapSeconds or profile.loopGapSeconds or 0.05,
   }
 end
 
@@ -1440,27 +1458,172 @@ function buildAlarmSoundBuffer(profile, sound)
   return nil
 end
 
-function playAlarmBuffer(profile, speaker, pcm, volume)
+function alarmPlaybackChunkSize(profile)
+  local audioConfig = alarmAudioConfig(profile)
+  local chunkSamples = tonumber(audioConfig.chunkSamples) or tonumber(audioConfig.maxSamples) or 128000
+  if chunkSamples <= 0 then
+    chunkSamples = 128000
+  end
+  chunkSamples = math.floor(chunkSamples)
+  if chunkSamples < 1024 then
+    chunkSamples = 1024
+  elseif chunkSamples > 128000 then
+    chunkSamples = 128000
+  end
+  return chunkSamples
+end
+
+function alarmPcmDuration(profile, pcm)
+  if type(pcm) ~= "table" or #pcm == 0 then
+    return 0
+  end
+
+  local audioConfig = alarmAudioConfig(profile)
+  local sampleRate = tonumber(audioConfig.sampleRate) or 48000
+  if sampleRate <= 0 then
+    sampleRate = 48000
+  end
+  return #pcm / sampleRate
+end
+
+function alarmLoopGap(profile)
+  local audioConfig = alarmAudioConfig(profile)
+  local gap = tonumber(audioConfig.loopGapSeconds)
+  if gap == nil then
+    gap = 0.05
+  end
+  return math.max(0, gap)
+end
+
+function pruneAlarmAudioStreams()
+  state.alarm.audioStreams = state.alarm.audioStreams or {}
+  local now = os.clock()
+  for name, stream in pairs(state.alarm.audioStreams) do
+    if not state.alarm.active or stream.generation ~= state.alarm.audioGeneration or (stream.deadline and now > stream.deadline) then
+      state.alarm.audioStreams[name] = nil
+    end
+  end
+end
+
+function alarmAudioBusy()
+  pruneAlarmAudioStreams()
+  if (tonumber(state.alarm.audioPlayingUntil) or 0) > os.clock() then
+    return true
+  end
+  for _ in pairs(state.alarm.audioStreams or {}) do
+    return true
+  end
+  return false
+end
+
+function clearAlarmAudioStreams(stopSpeakers)
+  state.alarm.audioStreams = {}
+  state.alarm.audioPlayingUntil = 0
+  state.alarm.audioGeneration = (state.alarm.audioGeneration or 0) + 1
+
+  if stopSpeakers then
+    for _, entry in ipairs(findSpeakerEntries()) do
+      if entry.speaker and entry.speaker.stop then
+        pcall(entry.speaker.stop)
+      end
+    end
+  end
+end
+
+function alarmFeedSpeakerStream(speakerName)
+  local stream = state.alarm.audioStreams and state.alarm.audioStreams[speakerName]
+  if not stream then
+    return false
+  end
+  if not state.alarm.active or stream.generation ~= state.alarm.audioGeneration then
+    state.alarm.audioStreams[speakerName] = nil
+    return false
+  end
+  if not (stream.speaker and stream.speaker.playAudio) then
+    state.alarm.audioStreams[speakerName] = nil
+    return false
+  end
+  while stream.nextIndex <= #stream.pcm do
+    local chunk = {}
+    local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
+    for index = stream.nextIndex, last do
+      chunk[#chunk + 1] = clampSample(stream.pcm[index])
+    end
+
+    local ok, accepted = pcall(stream.speaker.playAudio, chunk, stream.volume)
+    if not ok then
+      state.alarm.audioStreams[speakerName] = nil
+      return false
+    end
+    if accepted == false then
+      return false
+    end
+
+    stream.startedPlaybackAt = stream.startedPlaybackAt or os.clock()
+    stream.nextIndex = last + 1
+    stream.lastQueuedAt = os.clock()
+    state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, stream.startedPlaybackAt + (#stream.pcm / stream.sampleRate))
+    stream.deadline = math.max(tonumber(stream.deadline) or 0, (tonumber(state.alarm.audioPlayingUntil) or os.clock()) + 5)
+  end
+
+  state.alarm.audioStreams[speakerName] = nil
+  return true
+end
+
+function handleAlarmSpeakerAudioEmpty(speakerName)
+  if type(speakerName) ~= "string" then
+    return false
+  end
+  return alarmFeedSpeakerStream(speakerName)
+end
+
+function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume)
   if not (speaker and speaker.playAudio and type(pcm) == "table" and #pcm > 0) then
     return false
   end
 
+  speakerName = tostring(speakerName or "")
   local audioConfig = alarmAudioConfig(profile)
-  local maxSamples = tonumber(audioConfig.maxSamples) or 128000
-  if maxSamples <= 0 or #pcm <= maxSamples then
-    local ok, accepted = pcall(speaker.playAudio, pcm, volume)
+  local sampleRate = tonumber(audioConfig.sampleRate) or 48000
+  if sampleRate <= 0 then
+    sampleRate = 48000
+  end
+  local chunkSamples = alarmPlaybackChunkSize(profile)
+  local duration = alarmPcmDuration(profile, pcm)
+  state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, os.clock() + duration)
+
+  if speakerName == "" then
+    local chunk = {}
+    local last = math.min(#pcm, chunkSamples)
+    for index = 1, last do
+      chunk[index] = clampSample(pcm[index])
+    end
+    local ok, accepted = pcall(speaker.playAudio, chunk, volume)
     return ok and accepted ~= false
   end
 
-  local chunk = {}
-  for index = 1, maxSamples do
-    chunk[index] = clampSample(pcm[index])
-  end
-  local ok, accepted = pcall(speaker.playAudio, chunk, volume)
-  return ok and accepted ~= false
+  state.alarm.audioStreams = state.alarm.audioStreams or {}
+  state.alarm.audioStreams[speakerName] = {
+    name = speakerName,
+    speaker = speaker,
+    pcm = pcm,
+    volume = volume,
+    nextIndex = 1,
+    chunkSamples = chunkSamples,
+    sampleRate = sampleRate,
+    generation = state.alarm.audioGeneration or 0,
+    deadline = os.clock() + duration + 5,
+  }
+
+  local queued = alarmFeedSpeakerStream(speakerName)
+  return queued or state.alarm.audioStreams[speakerName] ~= nil
 end
 
-function playAlarmAudioSound(profile, sound, speaker)
+function playAlarmBuffer(profile, speaker, pcm, volume, speakerName)
+  return startAlarmAudioStream(profile, speakerName, speaker, pcm, volume)
+end
+
+function playAlarmAudioSound(profile, sound, speaker, speakerName)
   local buffer = buildAlarmSoundBuffer(profile, sound)
   if not buffer then
     return false
@@ -1468,7 +1631,7 @@ function playAlarmAudioSound(profile, sound, speaker)
 
   local dsp = profile.dsp or {}
   local volume = type(sound) == "table" and sound.volume or nil
-  return playAlarmBuffer(profile, speaker, buffer, tonumber(volume) or tonumber(profile.volume) or tonumber(dsp.volume) or 1)
+  return playAlarmBuffer(profile, speaker, buffer, tonumber(volume) or tonumber(profile.volume) or tonumber(dsp.volume) or 1, speakerName)
 end
 
 function playDspAlarm(profile, speaker)
@@ -1520,6 +1683,10 @@ function alarmSoundValue(sound, key, fallback)
 end
 
 function playAlarmPulse()
+  if alarmAudioBusy() then
+    return false
+  end
+
   local profile = alarmProfile(state.alarm.profile)
   local sounds = profile.sounds or {}
   local sound = sounds[state.alarm.soundIndex] or sounds[1]
@@ -1528,8 +1695,17 @@ function playAlarmPulse()
     state.alarm.soundIndex = 1
   end
 
-  for _, speaker in ipairs(findSpeakers()) do
-    local played = playAlarmAudioSound(profile, sound, speaker)
+  local audioBuffer = buildAlarmSoundBuffer(profile, sound)
+  local dsp = profile.dsp or {}
+  local audioVolume = type(sound) == "table" and sound.volume or nil
+  audioVolume = tonumber(audioVolume) or tonumber(profile.volume) or tonumber(dsp.volume) or 1
+
+  for _, entry in ipairs(findSpeakerEntries()) do
+    local speaker = entry.speaker
+    local played = false
+    if audioBuffer then
+      played = playAlarmBuffer(profile, speaker, audioBuffer, audioVolume, entry.name)
+    end
     if not played then
       played = playDspAlarm(profile, speaker)
     end
@@ -1540,11 +1716,20 @@ function playAlarmPulse()
       pcall(speaker.playNote, "pling", alarmSoundValue(sound, "volume", 2), alarmSoundValue(sound, "pitch", 1))
     end
   end
+  return true
+end
+
+function alarmNextPulseDelay()
+  local profile = alarmProfile(state.alarm.profile)
+  if alarmAudioBusy() then
+    return math.max(0.1, ((tonumber(state.alarm.audioPlayingUntil) or os.clock()) - os.clock()) + alarmLoopGap(profile))
+  end
+  return tonumber(profile.repeatSeconds) or 1.5
 end
 
 function scheduleAlarmPulse()
   if state.alarm.active then
-    scheduleTimer(alarmProfile(state.alarm.profile).repeatSeconds, { type = "alarm_pulse" })
+    scheduleTimer(alarmNextPulseDelay(), { type = "alarm_pulse" })
   end
 end
 
@@ -1553,6 +1738,7 @@ function raiseAlarm(reason, doorId, actor, profileName)
   if state.alarm.active then
     if profileName == "emergency" and state.alarm.profile ~= "emergency" then
       setAlarmOutputs(false)
+      clearAlarmAudioStreams(true)
       state.alarm.reason = reason or "emergency"
       state.alarm.door = doorId
       state.alarm.actor = actor
@@ -1560,6 +1746,7 @@ function raiseAlarm(reason, doorId, actor, profileName)
       state.alarm.soundIndex = 1
       setAlarmOutputs(true)
       playAlarmPulse()
+      scheduleAlarmPulse()
       local profile = alarmProfile("emergency")
       sendChat((profile.label or "EMERGENCY") .. ": " .. state.alarm.reason, "emergency")
       broadcastAlarmState()
@@ -1598,6 +1785,7 @@ function raiseAlarm(reason, doorId, actor, profileName)
   state.alarm.profile = profileName
   state.alarm.since = os.clock()
   state.alarm.soundIndex = 1
+  clearAlarmAudioStreams(true)
 
   setAlarmOutputs(true)
   playAlarmPulse()
@@ -1625,6 +1813,7 @@ function resetAlarm(actor)
   state.alarm.actor = nil
   state.alarm.profile = nil
   state.alarm.since = nil
+  clearAlarmAudioStreams(true)
   audit("ALARM_RESET", actor or "console")
   broadcastAlarmState()
   broadcastEventNotification("alarm_reset", "Alarm Reset", "Alarm cleared by " .. tostring(actor or "console"), "info")
@@ -5787,12 +5976,20 @@ function kioskApplyAlarmMessage(message, sender)
 
   local alarm = message.alarm or (message.status and message.status.alarm)
   if alarm then
+    local wasActive = state.alarm.active
+    local oldProfile = state.alarm.profile
     state.alarm.active = alarm.active and true or false
     state.alarm.reason = alarm.reason
     state.alarm.actor = alarm.actor
     state.alarm.door = alarm.door
     state.alarm.profile = alarm.profile
     if not state.alarm.active then
+      clearAlarmAudioStreams(true)
+      state.kiosk.lastAlarmSound = 0
+      state.alarm.soundIndex = 1
+    elseif (not wasActive) or oldProfile ~= state.alarm.profile then
+      clearAlarmAudioStreams(true)
+      state.kiosk.lastAlarmSound = 0
       state.alarm.soundIndex = 1
     end
   end
@@ -5995,14 +6192,24 @@ function kioskAlarmSpeakerLoop()
   while state.kiosk.running do
     if state.alarm.active then
       local interval = tonumber(config.kiosk and config.kiosk.alarmSoundSeconds) or alarmProfile(state.alarm.profile).repeatSeconds or 1.5
-      if os.clock() - (state.kiosk.lastAlarmSound or 0) >= interval then
+      if (not alarmAudioBusy()) and os.clock() - (state.kiosk.lastAlarmSound or 0) >= interval then
         playAlarmPulse()
         state.kiosk.lastAlarmSound = os.clock()
       end
     else
       state.kiosk.lastAlarmSound = 0
+      if (tonumber(state.alarm.audioPlayingUntil) or 0) > 0 or next(state.alarm.audioStreams or {}) ~= nil then
+        clearAlarmAudioStreams(true)
+      end
     end
     sleep(0.1)
+  end
+end
+
+function alarmAudioStreamLoop()
+  while state.running or state.kiosk.running do
+    local event = { os.pullEventRaw("speaker_audio_empty") }
+    handleAlarmSpeakerAudioEmpty(event[2])
   end
 end
 
@@ -7052,7 +7259,7 @@ function kioskMain()
   drawMonitors(true)
 
   local ok, err = pcall(function()
-    parallel.waitForAny(kioskUiLoop, kioskNetworkLoop, kioskAlarmSpeakerLoop, kioskMonitorLoop, kioskMaintenanceLoop, kioskLocalControllerLoop)
+    parallel.waitForAny(kioskUiLoop, kioskNetworkLoop, kioskAlarmSpeakerLoop, alarmAudioStreamLoop, kioskMonitorLoop, kioskMaintenanceLoop, kioskLocalControllerLoop)
   end)
 
   state.kiosk.running = false
@@ -7144,6 +7351,7 @@ function shutdownHardware()
 
   if config.clearAlarmOnExit then
     setAlarmOutputs(false)
+    clearAlarmAudioStreams(true)
   end
 end
 
@@ -7186,7 +7394,9 @@ function eventLoop()
           scheduleAnnouncementTimer()
         elseif payload.type == "alarm_pulse" then
           if state.alarm.active then
-            playAlarmPulse()
+            if not alarmAudioBusy() then
+              playAlarmPulse()
+            end
             scheduleAlarmPulse()
           end
         elseif payload.type == "door_lock" then
@@ -7287,7 +7497,7 @@ function main()
   })
 
   local ok, err = pcall(function()
-    parallel.waitForAny(eventLoop, consoleLoop)
+    parallel.waitForAny(eventLoop, consoleLoop, alarmAudioStreamLoop)
   end)
 
   shutdownHardware()
