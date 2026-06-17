@@ -109,6 +109,7 @@ return {
         "notificationUsesAnnouncementAudio",
         "announcementIsAlarmLike",
         "playFacilityAnnouncement",
+        "pruneAnnouncementAudioStreams",
         "feedAnnouncementAudioStreams",
         "handleAnnouncementSpeakerAudioEmpty",
         "includeAlarm",

@@ -73,9 +73,11 @@ return {
     volume = 1,
     sampleRate = 48000,
     maxSamples = 128000,
-    chunkSamples = 48000,
-    streamGraceSeconds = 20,
-    watchdogSeconds = 0.2,
+    chunkSamples = 24000,
+    streamGraceSeconds = 30,
+    watchdogSeconds = 0.1,
+    tailSeconds = 0.5,
+    maxChunksPerFeed = 2,
     serverPlayback = true,
     alarmAnnouncements = true,
     syncAssets = true,
@@ -205,7 +207,7 @@ return {
       slopday = { files = { "announcements/slopday.wav" } },
       slopday_cancelled = { files = { "announcements/slopdaycancelled.wav" } },
       slopday_slop = { files = { "announcements/slopdayslop.wav" } },
-      slopday_slop = { files = { "announcements/slopdaynonono.wav" } },
+      slopday_nonono = { files = { "announcements/slopdaynonono.wav" } },
     },
     jingles = {
       announcement = {
