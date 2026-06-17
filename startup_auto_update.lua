@@ -12,6 +12,9 @@ local NOTIFICATIONS_MODULE_FILE = "security_system_notifications.lua"
 local ANNOUNCEMENTS_MODULE_FILE = "security_system_announcements.lua"
 local CONFIG_FILE = "security_config.lua"
 local KIOSK_CONFIG_EXAMPLE = "security_kiosk_config.example.lua"
+local INSTALL_SUBDIR = "security_system"
+local INSTALL_ROOT = ""
+local INSTALL_DESCRIPTION = "computer storage"
 
 -- Set this to "server" or "kiosk" to force a mode. Leave nil to read
 -- security_config.lua, falling back to server mode.
@@ -62,7 +65,7 @@ local FALLBACK_MANIFEST = {
       path = ANNOUNCEMENTS_MODULE_FILE,
       required = true,
       minSize = 1000,
-      contains = { "Facility announcement audio", "function M.loadWav", "function M.buildAnnouncementBuffer", "function M.play" },
+      contains = { "Facility announcement audio", "SECURITY_SYSTEM_ASSET_ROOT", "function M.loadWav", "function M.buildAnnouncementBuffer", "function M.play" },
     },
     {
       path = APP_MODULE_FILE,
@@ -74,7 +77,7 @@ local FALLBACK_MANIFEST = {
       path = PROGRAM,
       required = true,
       minSize = 300,
-      contains = { "security_system_app", "app.run" },
+      contains = { "security_system_app", "SECURITY_SYSTEM_ASSET_ROOT", "app.run" },
     },
     {
       path = MANIFEST_FILE,
@@ -91,16 +94,178 @@ local function clear()
   term.clear()
 end
 
+local function normalizePath(path)
+  path = string.gsub(tostring(path or ""), "\\", "/")
+  while string.sub(path, 1, 1) == "/" do
+    path = string.sub(path, 2)
+  end
+  return path
+end
+
+local function combinePath(base, path)
+  base = normalizePath(base)
+  path = normalizePath(path)
+  if base == "" then
+    return path
+  end
+  if path == "" then
+    return base
+  end
+  if fs.combine then
+    return fs.combine(base, path)
+  end
+  return base .. "/" .. path
+end
+
+local function installPath(path)
+  if INSTALL_ROOT == "" then
+    return normalizePath(path)
+  end
+  return combinePath(INSTALL_ROOT, path)
+end
+
+local function configPath()
+  return CONFIG_FILE
+end
+
+local function ensureDir(path)
+  path = normalizePath(path)
+  if path ~= "" and not fs.exists(path) then
+    fs.makeDir(path)
+  end
+end
+
+local function writableDir(path)
+  path = normalizePath(path)
+  local ok = pcall(ensureDir, path)
+  if not ok then
+    return false
+  end
+
+  local testPath = combinePath(path, ".security_update_write_test")
+  local handle = fs.open(testPath, "w")
+  if not handle then
+    return false
+  end
+  handle.write("ok")
+  handle.close()
+  if fs.exists(testPath) then
+    fs.delete(testPath)
+  end
+  return true
+end
+
+local function freeSpace(path)
+  if not fs.getFreeSpace then
+    return 0
+  end
+  local ok, value = pcall(fs.getFreeSpace, path)
+  if not ok then
+    return 0
+  end
+  if value == "unlimited" then
+    return 2147483647
+  end
+  return tonumber(value) or 0
+end
+
+local function addCandidate(candidates, seen, mount)
+  mount = normalizePath(mount)
+  if mount == "" or seen[mount] or not fs.exists(mount) or not fs.isDir(mount) then
+    return
+  end
+  seen[mount] = true
+  table.insert(candidates, mount)
+end
+
+local function diskMountCandidates()
+  local candidates = {}
+  local seen = {}
+
+  if peripheral and disk and peripheral.getNames then
+    for _, name in ipairs(peripheral.getNames()) do
+      local isDrive = false
+      local types = { peripheral.getType(name) }
+      for _, kind in ipairs(types) do
+        if kind == "drive" then
+          isDrive = true
+        end
+      end
+      if isDrive then
+        local presentOk, present = pcall(disk.isPresent, name)
+        if (not disk.isPresent) or (presentOk and present) then
+          local okMount, mount = pcall(disk.getMountPath, name)
+          if okMount and mount then
+            addCandidate(candidates, seen, mount)
+          end
+        end
+      end
+    end
+  end
+
+  if fs.list then
+    local okList, names = pcall(fs.list, "")
+    if okList and type(names) == "table" then
+      for _, name in ipairs(names) do
+        if string.sub(tostring(name), 1, 4) == "disk" then
+          addCandidate(candidates, seen, name)
+        end
+      end
+    end
+  end
+
+  return candidates
+end
+
+local function configurePackagePath()
+  if INSTALL_ROOT == "" or not (package and package.path) then
+    return
+  end
+
+  local modulePath = installPath("?.lua")
+  if not string.find(package.path, modulePath, 1, true) then
+    package.path = modulePath .. ";" .. installPath("?/init.lua") .. ";" .. package.path
+  end
+end
+
+local function selectInstallRoot()
+  INSTALL_ROOT = ""
+  INSTALL_DESCRIPTION = "computer storage"
+
+  local bestRoot = nil
+  local bestMount = nil
+  local bestFree = -1
+  for _, mount in ipairs(diskMountCandidates()) do
+    local root = combinePath(mount, INSTALL_SUBDIR)
+    if writableDir(root) then
+      local space = freeSpace(root)
+      if space > bestFree then
+        bestRoot = root
+        bestMount = mount
+        bestFree = space
+      end
+    end
+  end
+
+  if bestRoot then
+    INSTALL_ROOT = bestRoot
+    INSTALL_DESCRIPTION = "disk " .. tostring(bestMount) .. " (" .. INSTALL_ROOT .. ")"
+    configurePackagePath()
+  end
+
+  return INSTALL_DESCRIPTION
+end
+
 local function readConfigMode()
   if MODE_OVERRIDE then
     return MODE_OVERRIDE
   end
 
-  if not fs.exists(CONFIG_FILE) then
+  if not fs.exists(configPath()) then
     return "server"
   end
 
-  local fn = loadfile(CONFIG_FILE)
+  local fn = loadfile(configPath())
   if not fn then
     return "server"
   end
@@ -114,11 +279,11 @@ local function readConfigMode()
 end
 
 local function loadConfigTable()
-  if not fs.exists(CONFIG_FILE) then
+  if not fs.exists(configPath()) then
     return {}
   end
 
-  local fn = loadfile(CONFIG_FILE)
+  local fn = loadfile(configPath())
   if not fn then
     return {}
   end
@@ -131,16 +296,20 @@ local function loadConfigTable()
 end
 
 local function copyKioskConfigIfMissing(mode)
-  if mode ~= "kiosk" or fs.exists(CONFIG_FILE) then
+  if mode ~= "kiosk" or fs.exists(configPath()) then
     return
   end
 
-  if fs.exists(KIOSK_CONFIG_EXAMPLE) then
-    fs.copy(KIOSK_CONFIG_EXAMPLE, CONFIG_FILE)
+  local examplePath = installPath(KIOSK_CONFIG_EXAMPLE)
+  if not fs.exists(examplePath) and fs.exists(KIOSK_CONFIG_EXAMPLE) then
+    examplePath = KIOSK_CONFIG_EXAMPLE
+  end
+  if fs.exists(examplePath) then
+    fs.copy(examplePath, configPath())
     return
   end
 
-  local handle = fs.open(CONFIG_FILE, "w")
+  local handle = fs.open(configPath(), "w")
   handle.writeLine("return {")
   handle.writeLine("  mode = \"kiosk\",")
   handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },")
@@ -402,7 +571,7 @@ local function syncConfigFromSecurityServer(mode)
   if not rednet then
     return true, "rednet unavailable; skipped config sync", false
   end
-  if not fs.exists(REDNET_MODULE_FILE) then
+  if not fs.exists(installPath(REDNET_MODULE_FILE)) then
     return true, "rednet module unavailable; skipped config sync", false
   end
 
@@ -445,13 +614,13 @@ local function syncConfigFromSecurityServer(mode)
           decoded.config.kiosk = decoded.config.kiosk or {}
           decoded.config.kiosk.controller = current.kiosk.controller
         end
-        local oldText = readFile(CONFIG_FILE)
+        local oldText = readFile(configPath())
         local newText = "-- Synced from security server by startup_auto_update.lua.\nreturn " .. textutils.serialize(decoded.config) .. "\n"
         if oldText == newText then
           return true, "config already current from server " .. tostring(sender), false
         end
-        backupFile(CONFIG_FILE)
-        writeFile(CONFIG_FILE, newText)
+        backupFile(configPath())
+        writeFile(configPath(), newText)
         return true, "config synced from server " .. tostring(sender), true
       end
     end
@@ -461,11 +630,11 @@ local function syncConfigFromSecurityServer(mode)
 end
 
 local function loadLocalManifest()
-  local data = readFile(MANIFEST_FILE)
+  local data = readFile(installPath(MANIFEST_FILE))
   if not data then
     return nil, "no local manifest"
   end
-  return loadReturnedTable(data, "@" .. MANIFEST_FILE)
+  return loadReturnedTable(data, "@" .. installPath(MANIFEST_FILE))
 end
 
 local function fetchManifest()
@@ -492,6 +661,7 @@ local function updateOneFile(baseUrl, file)
     return false, "manifest entry missing path", false
   end
 
+  local target = installPath(file.target or path)
   local binary = isBinaryFile(file)
   local body, err = fetchUrl(file.url or fileUrl(baseUrl, path), binary)
   if not body then
@@ -503,13 +673,13 @@ local function updateOneFile(baseUrl, file)
     return false, validErr, false
   end
 
-  local current = readFile(path, binary)
+  local current = readFile(target, binary)
   if current == body then
     return true, "current", false
   end
 
-  backupFile(path)
-  if not writeFile(path, body, binary) then
+  backupFile(target)
+  if not writeFile(target, body, binary) then
     return false, "write failed", false
   end
   return true, "updated", true
@@ -596,18 +766,18 @@ local function installServerConfigIfMissing(mode)
   if mode ~= "server" then
     return true, "not server mode", false
   end
-  if fs.exists(CONFIG_FILE) then
-    return true, "existing " .. CONFIG_FILE, false
+  if fs.exists(configPath()) then
+    return true, "existing " .. configPath(), false
   end
   if not (http and http.get) then
-    return false, "missing " .. CONFIG_FILE .. " and HTTP API is disabled", false
+    return false, "missing " .. configPath() .. " and HTTP API is disabled", false
   end
 
   local manifest, manifestSource = fetchManifest()
   local entry = normalizeConfigEntry(manifest)
   local baseUrl = entry.baseUrl or (manifest and manifest.baseUrl) or DEFAULT_BASE_URL
   local path = tostring(entry.path or CONFIG_FILE)
-  local target = tostring(entry.target or CONFIG_FILE)
+  local target = configPath()
   local body, fetchErr = fetchUrl(entry.url or fileUrl(baseUrl, path), false)
   if not body then
     return false, tostring(path) .. ": " .. tostring(fetchErr or "download failed"), false
@@ -621,9 +791,6 @@ local function installServerConfigIfMissing(mode)
     return false, tostring(path) .. ": " .. tostring(validErr), false
   end
 
-  if target ~= CONFIG_FILE then
-    target = CONFIG_FILE
-  end
   if not writeFile(target, body, false) then
     return false, "could not write " .. target, false
   end
@@ -727,23 +894,23 @@ local function fetchConfiguredWavs()
 end
 
 local function missingProgramFile()
-  if not fs.exists(PROGRAM) then
-    return PROGRAM
+  if not fs.exists(installPath(PROGRAM)) then
+    return installPath(PROGRAM)
   end
-  if not fs.exists(APP_MODULE_FILE) then
-    return APP_MODULE_FILE
+  if not fs.exists(installPath(APP_MODULE_FILE)) then
+    return installPath(APP_MODULE_FILE)
   end
-  if not fs.exists(DEFAULTS_MODULE_FILE) then
-    return DEFAULTS_MODULE_FILE
+  if not fs.exists(installPath(DEFAULTS_MODULE_FILE)) then
+    return installPath(DEFAULTS_MODULE_FILE)
   end
-  if not fs.exists(REDNET_MODULE_FILE) then
-    return REDNET_MODULE_FILE
+  if not fs.exists(installPath(REDNET_MODULE_FILE)) then
+    return installPath(REDNET_MODULE_FILE)
   end
-  if not fs.exists(NOTIFICATIONS_MODULE_FILE) then
-    return NOTIFICATIONS_MODULE_FILE
+  if not fs.exists(installPath(NOTIFICATIONS_MODULE_FILE)) then
+    return installPath(NOTIFICATIONS_MODULE_FILE)
   end
-  if not fs.exists(ANNOUNCEMENTS_MODULE_FILE) then
-    return ANNOUNCEMENTS_MODULE_FILE
+  if not fs.exists(installPath(ANNOUNCEMENTS_MODULE_FILE)) then
+    return installPath(ANNOUNCEMENTS_MODULE_FILE)
   end
   return nil
 end
@@ -756,23 +923,42 @@ local function runProgram(mode)
     read()
   end
 
+  configurePackagePath()
+  _G.SECURITY_SYSTEM_INSTALL_ROOT = INSTALL_ROOT
+  _G.SECURITY_SYSTEM_ASSET_ROOT = INSTALL_ROOT
+  local programPath = PROGRAM
+  local oldDir = shell.dir and shell.dir() or nil
+  if INSTALL_ROOT ~= "" then
+    if shell.setDir then
+      shell.setDir(INSTALL_ROOT)
+    else
+      programPath = installPath(PROGRAM)
+    end
+  end
+
   if mode == "kiosk" then
-    shell.run(PROGRAM, "kiosk")
+    shell.run(programPath, "kiosk")
   elseif mode == "controller" or mode == "door" or mode == "door_controller" then
-    shell.run(PROGRAM, "controller")
+    shell.run(programPath, "controller")
   else
-    shell.run(PROGRAM)
+    shell.run(programPath)
+  end
+
+  if oldDir and shell.setDir then
+    shell.setDir(oldDir)
   end
 end
 
 local function main()
   math.randomseed((os.epoch and os.epoch("utc") or math.floor(os.clock() * 100000)) % 2147483647)
+  local storage = selectInstallRoot()
   local mode = readConfigMode()
   copyKioskConfigIfMissing(mode)
 
   clear()
   print("Security auto-update startup")
   print("Mode: " .. tostring(mode))
+  print("Storage: " .. tostring(storage))
   print("Fetching manifest and app files...")
 
   local ok, message, updated = fetchUpdate()

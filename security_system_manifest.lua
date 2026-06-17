@@ -66,6 +66,7 @@ return {
       minSize = 1000,
       contains = {
         "Facility announcement audio",
+        "SECURITY_SYSTEM_ASSET_ROOT",
         "function M.loadWav",
         "function M.buildVoiceBuffer",
         "function M.buildAnnouncementBuffer",
@@ -103,6 +104,7 @@ return {
       minSize = 300,
       contains = {
         "security_system_app",
+        "SECURITY_SYSTEM_ASSET_ROOT",
         "app.run",
       },
     },
@@ -118,6 +120,8 @@ return {
       minSize = 1000,
       contains = {
         "security_system_manifest.lua",
+        "INSTALL_SUBDIR",
+        "selectInstallRoot",
         "installServerConfigIfMissing",
         "serverConfig",
       },

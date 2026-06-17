@@ -7,6 +7,19 @@ local REDNET_MODULE = "security_system_rednet"
 local NOTIFICATIONS_MODULE = "security_system_notifications"
 local ANNOUNCEMENTS_MODULE = "security_system_announcements"
 
+if shell and shell.getRunningProgram and fs and package and package.path then
+  local running = shell.getRunningProgram()
+  local dir = fs.getDir(running or "")
+  if dir and dir ~= "" then
+    local modulePath = fs.combine(dir, "?.lua")
+    if not string.find(package.path, modulePath, 1, true) then
+      package.path = modulePath .. ";" .. fs.combine(dir, "?/init.lua") .. ";" .. package.path
+    end
+    _G.SECURITY_SYSTEM_INSTALL_ROOT = _G.SECURITY_SYSTEM_INSTALL_ROOT or dir
+    _G.SECURITY_SYSTEM_ASSET_ROOT = _G.SECURITY_SYSTEM_ASSET_ROOT or dir
+  end
+end
+
 if package and package.loaded then
   package.loaded[APP_MODULE] = nil
   package.loaded[DEFAULTS_MODULE] = nil

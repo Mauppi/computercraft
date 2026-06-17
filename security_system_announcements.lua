@@ -4,6 +4,33 @@ local M = {}
 
 local DEFAULT_SAMPLE_RATE = 48000
 
+local function combinePath(base, path)
+  base = string.gsub(tostring(base or ""), "\\", "/")
+  path = string.gsub(tostring(path or ""), "\\", "/")
+  while string.sub(path, 1, 1) == "/" do
+    path = string.sub(path, 2)
+  end
+  if base == "" then
+    return path
+  end
+  if path == "" then
+    return base
+  end
+  if fs and fs.combine then
+    return fs.combine(base, path)
+  end
+  return base .. "/" .. path
+end
+
+local function assetPath(path)
+  local root = (_G and (_G.SECURITY_SYSTEM_ASSET_ROOT or _G.SECURITY_SYSTEM_INSTALL_ROOT)) or ""
+  root = tostring(root or "")
+  if root == "" then
+    return nil
+  end
+  return combinePath(root, path)
+end
+
 local function targetRate(config)
   return tonumber(config and config.sampleRate) or DEFAULT_SAMPLE_RATE
 end
@@ -28,7 +55,7 @@ local function appendSamples(buffer, samples)
   end
 end
 
-local function readFile(path)
+local function readFileAt(path)
   path = tostring(path or "")
   if path == "" then
     return nil, "empty path"
@@ -62,6 +89,24 @@ local function readFile(path)
   end
 
   return nil, "file unavailable"
+end
+
+local function readFile(path)
+  local data, err = readFileAt(path)
+  if data then
+    return data
+  end
+
+  local fallback = assetPath(path)
+  if fallback and fallback ~= path then
+    local fallbackData, fallbackErr = readFileAt(fallback)
+    if fallbackData then
+      return fallbackData
+    end
+    return nil, fallbackErr or err
+  end
+
+  return nil, err
 end
 
 local function u16le(data, pos)
