@@ -67,7 +67,7 @@ local FALLBACK_MANIFEST = {
       path = ANNOUNCEMENTS_MODULE_FILE,
       required = true,
       minSize = 1000,
-      contains = { "Facility announcement audio", "SECURITY_SYSTEM_ASSET_ROOT", "function M.loadWav", "function M.buildAnnouncementBuffer", "function M.play" },
+      contains = { "Facility announcement audio", "SECURITY_SYSTEM_ASSET_ROOT", "function M.loadWav", "function M.buildAnnouncementBuffer", "playPcmOnSpeakers", "speaker_audio_empty", "function M.play" },
     },
     {
       path = APP_MODULE_FILE,

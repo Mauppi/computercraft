@@ -421,23 +421,130 @@ function M.buildAnnouncementBuffer(announcement, config)
   return buffer
 end
 
-local function playBuffer(speaker, pcm, volume, config)
-  if not (speaker and speaker.playAudio and type(pcm) == "table" and #pcm > 0) then
+local function playbackChunkSamples(config)
+  local audio = type(config and config.audio) == "table" and config.audio or {}
+  local samples = tonumber(audio.chunkSamples or audio.playbackSamples or config.chunkSamples or config.playbackSamples or config.maxSamples) or 128000
+  if samples <= 0 then
+    samples = 128000
+  end
+  samples = math.floor(samples)
+  if samples < 1024 then
+    return 1024
+  end
+  if samples > 128000 then
+    return 128000
+  end
+  return samples
+end
+
+local function feedStream(stream)
+  if stream.done then
     return false
   end
 
-  local maxSamples = tonumber(config and config.maxSamples) or 128000
-  if maxSamples <= 0 or #pcm <= maxSamples then
-    local ok, accepted = pcall(speaker.playAudio, pcm, volume)
-    return ok and accepted ~= false
+  local acceptedAny = false
+  while stream.nextIndex <= #stream.pcm do
+    local chunk = {}
+    local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
+    for index = stream.nextIndex, last do
+      chunk[#chunk + 1] = clamp(stream.pcm[index])
+    end
+
+    local ok, accepted = pcall(stream.speaker.playAudio, chunk, stream.volume)
+    if not ok then
+      stream.done = true
+      stream.failed = true
+      return acceptedAny
+    end
+    if accepted == false then
+      return acceptedAny
+    end
+
+    stream.started = true
+    acceptedAny = true
+    stream.nextIndex = last + 1
   end
 
-  local chunk = {}
-  for index = 1, maxSamples do
-    chunk[index] = pcm[index]
+  stream.done = true
+  return acceptedAny
+end
+
+local function streamsDone(streams)
+  for _, stream in ipairs(streams) do
+    if not stream.done then
+      return false
+    end
   end
-  local ok, accepted = pcall(speaker.playAudio, chunk, volume)
-  return ok and accepted ~= false
+  return true
+end
+
+local function startedCount(streams)
+  local count = 0
+  for _, stream in ipairs(streams) do
+    if stream.started then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+local function waitForSpeakerReady(seconds)
+  seconds = tonumber(seconds) or 0.05
+  local pull = os and (os.pullEventRaw or os.pullEvent)
+  if os and os.startTimer and pull then
+    local timer = os.startTimer(seconds)
+    while true do
+      local event = { pull() }
+      if event[1] == "speaker_audio_empty" or (event[1] == "timer" and event[2] == timer) then
+        return
+      end
+    end
+  elseif sleep then
+    sleep(seconds)
+  end
+end
+
+local function playPcmOnSpeakers(speakers, pcm, volume, config)
+  if not (type(pcm) == "table" and #pcm > 0) then
+    return 0
+  end
+
+  local chunkSamples = playbackChunkSamples(config or {})
+  local sampleRate = targetRate(config or {})
+  local graceSeconds = tonumber(config and config.streamGraceSeconds) or 6
+  local deadline = os.clock() + (#pcm / math.max(1, sampleRate)) + graceSeconds
+  local streams = {}
+  for _, speaker in ipairs(speakers or {}) do
+    if speaker and speaker.playAudio then
+      streams[#streams + 1] = {
+        speaker = speaker,
+        pcm = pcm,
+        volume = volume,
+        nextIndex = 1,
+        chunkSamples = chunkSamples,
+      }
+    end
+  end
+
+  if #streams == 0 then
+    return 0
+  end
+
+  while not streamsDone(streams) do
+    for _, stream in ipairs(streams) do
+      feedStream(stream)
+    end
+
+    if streamsDone(streams) then
+      break
+    end
+    if os.clock() > deadline then
+      break
+    end
+    waitForSpeakerReady(0.05)
+  end
+
+  return startedCount(streams)
 end
 
 local function fallbackSounds(config, alarmLike)
@@ -458,14 +565,20 @@ function M.play(speakers, announcement, config)
 
   local alarmLike = isAlarmLike(announcement)
   local pcm = M.buildAnnouncementBuffer(announcement, config)
-  for _, speaker in ipairs(speakers or {}) do
-    local played = playBuffer(speaker, pcm, tonumber(config.volume) or 1, config)
-    if not played and speaker.playSound then
-      for _, sound in ipairs(fallbackSounds(config, alarmLike)) do
-        pcall(speaker.playSound, sound.name, sound.volume or 1, sound.pitch or 1)
+  local played = playPcmOnSpeakers(speakers, pcm, tonumber(config.volume) or 1, config)
+  if played == 0 then
+    for _, speaker in ipairs(speakers or {}) do
+      if speaker.playSound then
+        for _, sound in ipairs(fallbackSounds(config, alarmLike)) do
+          pcall(speaker.playSound, sound.name, sound.volume or 1, sound.pitch or 1)
+        end
       end
     end
   end
+end
+
+function M.playBuffer(speakers, pcm, volume, config)
+  return playPcmOnSpeakers(speakers, pcm, volume, config)
 end
 
 return M

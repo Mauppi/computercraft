@@ -70,6 +70,8 @@ return {
         "function M.loadWav",
         "function M.buildVoiceBuffer",
         "function M.buildAnnouncementBuffer",
+        "playPcmOnSpeakers",
+        "speaker_audio_empty",
         "function M.play",
       },
     },

@@ -195,7 +195,7 @@ Admins can send a facility announcement from the server console:
 announce <message>
 ```
 
-Announcements are pushed to kiosks as real-time notifications. Kiosks with speakers play a stitched `speaker.playAudio` buffer when available: jingle, optional WAV/PCM voice line segments, then generated PCM voice if no file-backed voice line is configured. Configure this under `announcements`; scheduled announcements can be enabled with `announcements.auto.enabled = true`.
+Announcements are pushed to kiosks as real-time notifications. Kiosks with speakers stream a stitched `speaker.playAudio` buffer when available: jingle, optional WAV/PCM voice line segments, then generated PCM voice if no file-backed voice line is configured. Long jingles and voice lines are split into `announcements.chunkSamples` packets, default `128000`, and continue on `speaker_audio_empty` instead of cutting off after the first packet. Configure this under `announcements`; scheduled announcements can be enabled with `announcements.auto.enabled = true`.
 
 Event and action announcements are configurable under `announcements.events` and `announcements.actions`. Each entry can use `variations` for random text, `voiceLine` for a configured WAV/PCM voice line, `chance` for probabilistic lines (`0.5` or `50` both mean 50%), and `cooldownSeconds` to avoid spam. Placeholders like `{facility}`, `{reason}`, `{actor}`, `{sensor}`, `{user}`, and `{action}` are replaced from the event or audit detail.
 
@@ -207,6 +207,8 @@ Voice lines can be raw PCM tables, one WAV file, or multiple WAV segments:
 announcements = {
   syncAssets = true,
   assetsRequired = false,
+  chunkSamples = 128000,
+  streamGraceSeconds = 6,
   -- assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
   events = {
     lockdown = {

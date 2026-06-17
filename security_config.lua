@@ -183,6 +183,8 @@ return {
     volume = 1,
     sampleRate = 48000,
     maxSamples = 128000,
+    chunkSamples = 128000,
+    streamGraceSeconds = 6,
     syncAssets = true,
     assetsRequired = false,
     -- assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
@@ -195,7 +197,7 @@ return {
     },
     lines = {
       "Remember: report hazards before hazards report you.",
-      { text = "Facility notice: keep badges visible in restricted areas.", voiceLine = "badge_notice" },
+      { text = "Facility notice: keep badges visible in restricted areas.", voiceLine = "memeorpo" },
     },
     eventAnnouncements = true,
     events = {
