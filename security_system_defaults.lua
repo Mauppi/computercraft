@@ -76,6 +76,7 @@ return {
       resetAlarm = 3,
       operateDoors = 3,
       lockdown = 4,
+      issueBadges = 5,
       setupFacility = 5,
       manageEmployees = 5,
       quitKiosk = 5,
@@ -98,9 +99,13 @@ return {
       DOOR_LOCK = 2,
       EMPLOYEE_LOGIN = 3,
       EMPLOYEE_LOGIN_DENIED = 3,
+      EMPLOYEE_BADGE_LOGIN = 3,
+      EMPLOYEE_BADGE_LOGIN_DENIED = 3,
       EMPLOYEE_ADD = 5,
       EMPLOYEE_ROLE = 5,
       EMPLOYEE_CLEARANCE = 5,
+      BADGE_ISSUE = 5,
+      BADGE_WRITE = 5,
       KIOSK_QUIT = 5,
       SETUP_CHANGE = 5,
       SETUP_DENIED = 5,
@@ -352,6 +357,7 @@ return {
   -- Source name to door id. Use "*" as a fallback for any reader.
   -- Disk drives, badge readers, player detectors, and remote reader peripherals
   -- are all treated as sources.
+  -- Door controller reader sources look like controller:<computerId>:<peripheral>.
   readers = {
     ["*"] = "main",
   },

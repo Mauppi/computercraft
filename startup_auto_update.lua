@@ -61,7 +61,7 @@ local FALLBACK_MANIFEST = {
       path = APP_MODULE_FILE,
       required = true,
       minSize = 2000,
-      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "function controllerMain()", "kiosk_setup", "function main()", "return {" },
+      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "function main()", "return {" },
     },
     {
       path = PROGRAM,

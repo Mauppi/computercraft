@@ -98,6 +98,31 @@ doors = {
 
 Use one controller computer per door when wiring is dense, or one controller for a few nearby doors when the redstone/peripheral layout is shared. The setup wizard stores the controller id on the door, so its output/contact/exit endpoints inherit that controller automatically.
 
+## Badge Writers And Door Scanners
+
+The server console supports NFC badge writing after `login <admin-pin>`:
+
+```lua
+badge writers
+badge write <data> [nfc-peripheral]
+badge issue <user> [data] [nfc-peripheral] [doorAccess]
+```
+
+`badge issue` writes the raw data to an NFC card with a local NFC reader/writer peripheral, then assigns the badge to the employee account. Leave `data` blank in the setup wizard to generate a unique badge id. `doorAccess` is optional: leave it blank for kiosk login only, use `*` for all doors, or use a comma-separated door list such as `main,vault`.
+
+High-clearance kiosks can do the same from `Facility setup` -> `Issue/write employee badge` if the kiosk has an NFC writer peripheral attached. The server enforces `employees.permissions.issueBadges`, default C5.
+
+Kiosk sign-in supports attached `rfid_scanner` peripherals and generic NFC/card reader methods. Use `Scan badge` on the sign-in screen; the kiosk sends the scanned credential candidates to the server, and the server only creates a session if the badge is assigned to an employee.
+
+Recommended door scanner layout:
+
+- Put the main server computer somewhere safe and keep the employee accounts, badge assignments, logs, and config there.
+- Put a door controller computer near every door, or near a small cluster of nearby doors. Attach redstone integrators, lock outputs, door contact sensors, request-exit buttons, NFC/RFID readers, and emergency buttons to that local controller where possible.
+- Run `security_system controller` on each door controller and use the setup wizard from the server or an authorized kiosk to scan that controller and add/update the doors.
+- Map each scanner source to the door it controls. Server-attached scanners use their peripheral name, such as `rfid_scanner_0`. Door-controller scanners are forwarded as `controller:<computerId>:<peripheral>`, such as `controller:23:rfid_scanner_0`.
+- Use RFID scanners for hands-free or area badge reads, and NFC readers/writers for issuing cards and deliberate tap-to-open points. Keep kiosk RFID scanners for employee login/admin setup, not as the primary door unlock path unless the kiosk is physically at that doorway.
+- Prefer one scanner source per door side when possible: outside reader opens the door, inside request-exit button opens the door, contact sensor detects forced-open state.
+
 ## Rednet Encryption And Notifications
 
 The app uses `security_system_rednet.lua` to wrap Rednet messages. To enable encrypted Rednet traffic, set the same key on the server and every kiosk:

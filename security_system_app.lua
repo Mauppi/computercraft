@@ -994,6 +994,7 @@ function alarmStatePayload()
       permissions = {
         quitKiosk = config.employees and config.employees.permissions and config.employees.permissions.quitKiosk or 5,
         setupFacility = config.employees and config.employees.permissions and config.employees.permissions.setupFacility or 5,
+        issueBadges = config.employees and config.employees.permissions and config.employees.permissions.issueBadges or 5,
       },
     },
     alarm = {
@@ -1465,6 +1466,11 @@ function authorizedCredential(doorId, kind, candidates, meta)
     end
   end
 
+  local employeeRecordForCredential, employeeCredential = employeeForCredential(candidates)
+  if employeeRecordForCredential and recordAllowsDoor(employeeRecordForCredential, doorId) then
+    return true, employeeCredential
+  end
+
   if kind == "player" then
     local playerName = meta and meta.player or candidates[1]
     if listContainsIgnoreCase(door.players, playerName) then
@@ -1541,6 +1547,34 @@ function shouldAcceptBadge(key, fingerprint)
     time = now,
   }
   return true
+end
+
+function badgeRawData(value)
+  local text = tostring(value or "")
+  local prefix, rest = string.match(text, "^(%a[%w_%-]*):(.+)$")
+  if prefix == "badge" or prefix == "nfc" or prefix == "rfid" then
+    return rest, prefix
+  end
+  return text, nil
+end
+
+function badgeAliases(kind, value)
+  local raw, embeddedKind = badgeRawData(value)
+  kind = embeddedKind or kind
+  local candidates = {}
+  if raw == "" then
+    return candidates, { id = raw, name = raw, kind = kind }
+  end
+  if kind and kind ~= "" then
+    appendUnique(candidates, tostring(kind) .. ":" .. raw)
+  end
+  appendUnique(candidates, "badge:" .. raw)
+  appendUnique(candidates, raw)
+  return candidates, {
+    id = raw,
+    name = raw,
+    kind = kind,
+  }
 end
 
 function handleCredentials(source, kind, candidates, meta, cooldownKey)
@@ -1662,6 +1696,80 @@ function pollDiskDrives()
   end
 end
 
+local nfcWriteMethods = {
+  "writeNFC",
+  "writeNfc",
+  "writeNfcData",
+  "writeNFCData",
+  "writeData",
+  "writeCard",
+  "writeBadge",
+  "write",
+  "setData",
+  "encode",
+}
+
+function badgeWriterNames()
+  local out = {}
+  if not peripheral then
+    return out
+  end
+
+  for _, name in ipairs(peripheral.getNames()) do
+    local methods = methodMap(name)
+    local looksLikeNfc = hasPeripheralType(name, "nfc_reader") or hasPeripheralType(name, "nfc_writer") or hasPeripheralType(name, "nfc")
+    for _, method in ipairs(nfcWriteMethods) do
+      if methods[method] then
+        table.insert(out, name)
+        looksLikeNfc = false
+        break
+      end
+    end
+    if looksLikeNfc then
+      table.insert(out, name)
+    end
+  end
+
+  table.sort(out)
+  return out
+end
+
+function writeNfcBadgeData(data, preferredPeripheral)
+  local raw = badgeRawData(data)
+  if raw == "" then
+    return false, "empty badge data"
+  end
+
+  local names = {}
+  if preferredPeripheral and tostring(preferredPeripheral) ~= "" then
+    table.insert(names, tostring(preferredPeripheral))
+  else
+    names = badgeWriterNames()
+  end
+
+  if #names == 0 then
+    return false, "no NFC writer peripheral found"
+  end
+
+  for _, name in ipairs(names) do
+    local device = peripheral.wrap(name)
+    local methods = methodMap(name)
+    if device then
+      for _, method in ipairs(nfcWriteMethods) do
+        if methods[method] and device[method] then
+          local ok, result = pcall(device[method], raw)
+          if ok and result ~= false then
+            audit("BADGE_WRITE", { peripheral = name, method = method, data = raw })
+            return true, name, method
+          end
+        end
+      end
+    end
+  end
+
+  return false, "NFC writer did not accept the data"
+end
+
 local genericBadgeMethods = {
   "getBadge",
   "readBadge",
@@ -1671,6 +1779,12 @@ local genericBadgeMethods = {
   "getCardData",
   "getRFID",
   "readRFID",
+  "getNFC",
+  "readNFC",
+  "getNfc",
+  "readNfc",
+  "getNfcData",
+  "readNfcData",
   "getLastBadge",
 }
 
@@ -1679,10 +1793,7 @@ function candidatesFromValue(value)
   local meta = {}
 
   if type(value) == "string" or type(value) == "number" then
-    meta.id = tostring(value)
-    meta.name = tostring(value)
-    appendUnique(candidates, "badge:" .. tostring(value))
-    appendUnique(candidates, tostring(value))
+    candidates, meta = badgeAliases("badge", value)
     return candidates, meta
   end
 
@@ -1718,6 +1829,88 @@ function candidatesFromValue(value)
   return candidates, meta
 end
 
+function rfidBadgeCandidates(badge)
+  if type(badge) == "table" and badge.data ~= nil then
+    local candidates, meta = badgeAliases("rfid", badge.data)
+    meta.distance = badge.distance
+    return candidates, meta
+  end
+
+  if type(badge) == "string" or type(badge) == "number" then
+    return badgeAliases("rfid", badge)
+  end
+
+  return {}, {}
+end
+
+function scanRfidScannerCredentials()
+  if not peripheral then
+    return nil
+  end
+
+  for _, name in ipairs(peripheral.getNames()) do
+    if hasPeripheralType(name, "rfid_scanner") then
+      local device = peripheral.wrap(name)
+      if device and device.scan then
+        local ok, badges = pcall(device.scan)
+        if ok and type(badges) == "table" then
+          for _, badge in ipairs(badges) do
+            local candidates, meta = rfidBadgeCandidates(badge)
+            if #candidates > 0 then
+              meta.source = name
+              return {
+                source = name,
+                kind = "rfid",
+                candidates = candidates,
+                meta = meta,
+                cooldown = "rfid:" .. name .. ":" .. tostring(meta.id or candidates[1]),
+              }
+            end
+          end
+        end
+      end
+    end
+  end
+
+  return nil
+end
+
+function scanGenericBadgeCredentials()
+  if not peripheral then
+    return nil
+  end
+
+  for _, name in ipairs(peripheral.getNames()) do
+    if not isDrive(name) then
+      local methods = methodMap(name)
+      for _, method in ipairs(genericBadgeMethods) do
+        if methods[method] then
+          local device = peripheral.wrap(name)
+          if device and device[method] then
+            local ok, value = pcall(device[method])
+            if ok and value ~= nil and value ~= false then
+              local candidates, meta = candidatesFromValue(value)
+              if #candidates > 0 then
+                meta.source = name
+                return {
+                  source = name,
+                  kind = "badge",
+                  candidates = candidates,
+                  meta = meta,
+                  cooldown = "badge:" .. name .. ":" .. tostring(meta.id or candidates[1]),
+                }
+              end
+            end
+          end
+          break
+        end
+      end
+    end
+  end
+
+  return nil
+end
+
 function pollGenericBadgeReaders()
   for _, name in ipairs(peripheral.getNames()) do
     if not isDrive(name) then
@@ -1749,29 +1942,9 @@ function pollRfidScanners()
         local ok, badges = pcall(device.scan)
         if ok and type(badges) == "table" then
           for _, badge in ipairs(badges) do
-            if type(badge) == "table" and badge.data ~= nil then
-              local data = tostring(badge.data)
-              local candidates = {
-                "rfid:" .. data,
-                "badge:" .. data,
-                data,
-              }
-              handleCredentials(name, "rfid", candidates, {
-                name = data,
-                id = data,
-                distance = badge.distance,
-              }, "rfid:" .. name .. ":" .. data)
-            elseif type(badge) == "string" or type(badge) == "number" then
-              local data = tostring(badge)
-              local candidates = {
-                "rfid:" .. data,
-                "badge:" .. data,
-                data,
-              }
-              handleCredentials(name, "rfid", candidates, {
-                name = data,
-                id = data,
-              }, "rfid:" .. name .. ":" .. data)
+            local candidates, meta = rfidBadgeCandidates(badge)
+            if #candidates > 0 then
+              handleCredentials(name, "rfid", candidates, meta, "rfid:" .. name .. ":" .. tostring(meta.id or candidates[1]))
             end
           end
         end
@@ -2359,6 +2532,49 @@ function broadcastControllerHello()
   end
 end
 
+function controllerCredentialSource(source)
+  return "controller:" .. tostring(localComputerId() or "?") .. ":" .. tostring(source or "reader")
+end
+
+function sendControllerCredential(scanned)
+  if type(scanned) ~= "table" or type(scanned.candidates) ~= "table" or #scanned.candidates == 0 then
+    return
+  end
+  if not (config and config.rednet and config.rednet.enabled and rednet) then
+    return
+  end
+
+  local fingerprint = table.concat(scanned.candidates, "|")
+  local localSource = tostring(scanned.source or "reader")
+  local source = controllerCredentialSource(localSource)
+  if not shouldAcceptBadge(source, fingerprint) then
+    return
+  end
+
+  local payload = {
+    op = "controller_credential",
+    controllerId = localComputerId(),
+    localSource = localSource,
+    source = source,
+    kind = scanned.kind or "badge",
+    candidates = scanned.candidates,
+    meta = scanned.meta,
+  }
+  local serverId = config.rednet and config.rednet.serverId
+  if serverId then
+    pcall(sendRednet, serverId, payload)
+  else
+    pcall(broadcastRednet, payload)
+  end
+end
+
+function controllerPollLocalCredentials()
+  local scanned = scanRfidScannerCredentials() or scanGenericBadgeCredentials()
+  if scanned then
+    sendControllerCredential(scanned)
+  end
+end
+
 function accountsPath()
   return (config.employees and config.employees.accountsFile) or ACCOUNTS_FILE
 end
@@ -2404,6 +2620,7 @@ function loadEmployeeData()
         pin = tostring(record.pin or ""),
         role = record.role or "employee",
         clearance = record.clearance,
+        credentials = shallowCopy(record.credentials or record.badges or record.cards),
         disabled = record.disabled or false,
         createdAt = timestamp(),
       }
@@ -2430,6 +2647,7 @@ function publicBrandPayload()
     permissions = {
       quitKiosk = config.employees and config.employees.permissions and config.employees.permissions.quitKiosk or 5,
       setupFacility = config.employees and config.employees.permissions and config.employees.permissions.setupFacility or 5,
+      issueBadges = config.employees and config.employees.permissions and config.employees.permissions.issueBadges or 5,
     },
   }
 end
@@ -2479,12 +2697,125 @@ function publicEmployee(record)
   }
 end
 
+function employeeCredentialList(record)
+  local out = {}
+  if type(record) ~= "table" then
+    return out
+  end
+
+  local fields = { "credentials", "badges", "cards", "rfids", "nfc" }
+  for _, field in ipairs(fields) do
+    local value = record[field]
+    if type(value) == "table" then
+      for _, item in ipairs(value) do
+        appendUnique(out, item)
+      end
+    elseif value ~= nil then
+      appendUnique(out, value)
+    end
+  end
+  return out
+end
+
+function recordHasCredential(record, candidates)
+  local owned = employeeCredentialList(record)
+  for _, candidate in ipairs(candidates or {}) do
+    if listContains(owned, candidate) then
+      return candidate
+    end
+  end
+  return nil
+end
+
+function employeeForCredential(candidates)
+  ensureEmployeeTables()
+
+  for _, candidate in ipairs(candidates or {}) do
+    local mapped = credentialRecord(candidate)
+    if type(mapped) == "table" then
+      local username = mapped.username or mapped.user or mapped.employee
+      local record = username and employeeRecord(username)
+      if record and not record.disabled then
+        return record, candidate
+      end
+    end
+  end
+
+  for _, username in ipairs(tableKeys(state.accounts.users)) do
+    local record = state.accounts.users[username]
+    if record and not record.disabled then
+      local matched = recordHasCredential(record, candidates)
+      if matched then
+        return record, matched
+      end
+    end
+  end
+
+  return nil, nil
+end
+
 function verifyEmployee(username, pin)
   local record = employeeRecord(username)
   if not record or record.disabled then
     return false, nil
   end
   return tostring(record.pin or "") == tostring(pin or ""), record
+end
+
+function verifyEmployeeCredential(candidates)
+  local record, credential = employeeForCredential(candidates)
+  return record ~= nil, record, credential
+end
+
+function issueEmployeeBadge(username, data, actor, doorAccess)
+  local record = employeeRecord(username)
+  if not record then
+    return false, "unknown employee"
+  end
+
+  local raw = badgeRawData(data)
+  if raw == "" then
+    raw = makeId("badge")
+  end
+
+  local candidates = badgeAliases("badge", raw)
+  record.credentials = record.credentials or {}
+  for _, candidate in ipairs(candidates) do
+    appendUnique(record.credentials, candidate)
+  end
+
+  if doorAccess and doorAccess ~= "" then
+    config.credentials = config.credentials or {}
+    local doors = {}
+    if doorAccess == "*" then
+      doors = { "*" }
+    else
+      for item in string.gmatch(tostring(doorAccess), "([^,]+)") do
+        item = string.gsub(item, "^%s+", "")
+        item = string.gsub(item, "%s+$", "")
+        if item ~= "" then
+          table.insert(doors, item)
+        end
+      end
+    end
+    if #doors > 0 then
+      config.credentials["badge:" .. raw] = {
+        username = record.username,
+        name = record.displayName or record.username,
+        doors = doors,
+      }
+    end
+  end
+
+  saveAccounts()
+  saveConfig()
+  audit("BADGE_ISSUE", {
+    actor = actor or "system",
+    user = record.username,
+    data = raw,
+    doorAccess = doorAccess,
+  })
+  return true, raw
 end
 
 function createSession(username, sender)
@@ -3008,6 +3339,14 @@ function applySetupReader(message, actor)
   return true, "reader mapped", { source = source, door = doorId }
 end
 
+function applySetupIssueBadge(message, actor)
+  local ok, result = issueEmployeeBadge(message.username or message.user, message.data or message.badge or message.credential, actor, message.doorAccess)
+  if not ok then
+    return false, result
+  end
+  return true, "badge issued", { data = result, credential = "badge:" .. tostring(result) }
+end
+
 function handleSetupAction(message, actor)
   local action = tostring(message.action or "summary")
   if action == "summary" then
@@ -3023,6 +3362,8 @@ function handleSetupAction(message, actor)
     return applySetupEmergencyButton(message, actor)
   elseif action == "map_reader" or action == "reader" then
     return applySetupReader(message, actor)
+  elseif action == "issue_badge" or action == "badge" then
+    return applySetupIssueBadge(message, actor)
   end
   return false, "unknown setup action"
 end
@@ -3050,6 +3391,28 @@ function handleKioskLoginMessage(sender, message, reply)
   else
     reply.error = "invalid login"
     audit("EMPLOYEE_LOGIN_DENIED", { user = message.username, sender = sender })
+  end
+end
+
+function handleKioskBadgeLoginMessage(sender, message, reply)
+  local candidates = message.candidates
+  if type(candidates) ~= "table" or #candidates == 0 then
+    if message.data or message.badge or message.credential then
+      candidates = badgeAliases(message.kind or "badge", message.data or message.badge or message.credential)
+    end
+  end
+
+  local ok, record, credential = verifyEmployeeCredential(candidates or {})
+  if ok then
+    reply.ok = true
+    reply.token = createSession(record.username, sender)
+    reply.user = publicEmployee(record)
+    reply.branding = publicBrandPayload()
+    reply.credential = credential
+    audit("EMPLOYEE_BADGE_LOGIN", { user = record.username, sender = sender, credential = credential })
+  else
+    reply.error = "badge not assigned"
+    audit("EMPLOYEE_BADGE_LOGIN_DENIED", { sender = sender, candidates = candidates })
   end
 end
 
@@ -3194,7 +3557,13 @@ function handleKioskSetupMessage(message, reply)
     return
   end
 
-  local record, err = requireSetupPermission(message.token)
+  local action = tostring(message.action or "summary")
+  local record, err
+  if action == "issue_badge" or action == "badge" then
+    record, err = requireEmployeePermission(message.token, "issueBadges")
+  else
+    record, err = requireSetupPermission(message.token)
+  end
   if not record then
     reply.error = err
     return
@@ -3304,6 +3673,24 @@ function handleFacilityFaultMessage(sender, message, reply)
   end
 end
 
+function handleControllerCredentialMessage(sender, message, reply)
+  local source = tostring(message.source or ("controller:" .. tostring(sender) .. ":" .. tostring(message.localSource or "reader")))
+  local candidates = message.candidates
+  if type(candidates) ~= "table" or #candidates == 0 then
+    candidates = badgeAliases(message.kind or "badge", message.data or message.badge or message.credential or "")
+  end
+  if #candidates == 0 then
+    reply.error = "missing credential"
+    return
+  end
+
+  handleCredentials(source, message.kind or "badge", candidates, message.meta or {
+    name = source,
+    source = source,
+  }, "controller:" .. tostring(sender) .. ":" .. table.concat(candidates, "|"))
+  reply.ok = true
+end
+
 function handleUnlockCredentialMessage(sender, message, doorId, reply)
   local credential = tostring(message.credential or message.badge)
   local candidates = { credential }
@@ -3356,6 +3743,8 @@ function handleRednetOperation(sender, message, reply)
     handleKioskHelloMessage(reply)
   elseif op == "kiosk_login" then
     handleKioskLoginMessage(sender, message, reply)
+  elseif op == "kiosk_badge_login" then
+    handleKioskBadgeLoginMessage(sender, message, reply)
   elseif op == "kiosk_register" then
     handleKioskRegisterMessage(message, reply)
   elseif op == "kiosk_logout" then
@@ -3388,6 +3777,8 @@ function handleRednetOperation(sender, message, reply)
     handleKioskSecurityActionMessage(sender, message, reply)
   elseif op == "controller_hello" then
     reply.ok = true
+  elseif op == "controller_credential" then
+    handleControllerCredentialMessage(sender, message, reply)
   elseif op == "facility_fault" then
     handleFacilityFaultMessage(sender, message, reply)
   elseif op == "unlock" then
@@ -4160,6 +4551,9 @@ function printHelp()
     "  unlockdown",
     "  allow badge <door> <credential>",
     "  allow player <door> <player>",
+    "  badge writers",
+    "  badge write <data> [nfc-peripheral]",
+    "  badge issue <user> [data] [nfc-peripheral] [doorAccess]",
     "  employee list",
     "  employee add <user> <pin> [display name]",
     "  employee role <user> <role>",
@@ -4266,6 +4660,50 @@ function handleEmployeeCommand(words)
     print((record.disabled and "Disabled " or "Enabled ") .. username)
   else
     print("Usage: employee list|add|role|clearance|disable|enable")
+  end
+end
+
+function handleBadgeCommand(words)
+  local subcommand = string.lower(words[2] or "")
+
+  if subcommand == "writers" or subcommand == "list-writers" then
+    local writers = badgeWriterNames()
+    if #writers == 0 then
+      print("No NFC writer peripherals found.")
+    else
+      for _, name in ipairs(writers) do
+        print(name)
+      end
+    end
+  elseif subcommand == "write" then
+    local data = words[3]
+    local writer = words[4]
+    if not data then
+      print("Usage: badge write <data> [nfc-peripheral]")
+      return
+    end
+    local ok, nameOrErr, method = writeNfcBadgeData(data, writer)
+    print(ok and ("Wrote badge with " .. tostring(nameOrErr) .. " via " .. tostring(method)) or ("Write failed: " .. tostring(nameOrErr)))
+  elseif subcommand == "issue" then
+    local username = words[3]
+    local data = words[4] or makeId("badge")
+    local writer = words[5]
+    local doorAccess = words[6]
+    if not username then
+      print("Usage: badge issue <user> [data] [nfc-peripheral] [doorAccess]")
+      return
+    end
+    local okWrite, writerResult, method = writeNfcBadgeData(data, writer)
+    if not okWrite then
+      print("Write failed: " .. tostring(writerResult))
+      return
+    end
+    local okIssue, issueResult = issueEmployeeBadge(username, data, "console", doorAccess)
+    print(okIssue and ("Issued " .. tostring(issueResult) .. " using " .. tostring(writerResult) .. " via " .. tostring(method)) or ("Issue failed: " .. tostring(issueResult)))
+  else
+    print("Usage: badge writers")
+    print("   or: badge write <data> [nfc-peripheral]")
+    print("   or: badge issue <user> [data] [nfc-peripheral] [doorAccess]")
   end
 end
 
@@ -4414,6 +4852,29 @@ function setupConsoleMapReader()
   print(ok and tostring(message) or ("Setup failed: " .. tostring(message)))
 end
 
+function setupConsoleIssueBadge()
+  local username = promptLine("Employee username", "")
+  local data = promptLine("Badge data blank=generate", "")
+  if data == "" or data == nil then
+    data = makeId("badge")
+  end
+  local writer = promptLine("NFC writer blank=auto", "")
+  local doorAccess = promptLine("Door access blank=login only, *=all, comma=list", "")
+  print("Place card on NFC writer.")
+  local okWrite, writerResult, method = writeNfcBadgeData(data, writer)
+  if not okWrite then
+    print("Write failed: " .. tostring(writerResult))
+    return
+  end
+  local ok, message, extra = handleSetupAction({
+    action = "issue_badge",
+    username = username,
+    data = data,
+    doorAccess = doorAccess,
+  }, "console")
+  print(ok and ("Issued " .. tostring(extra and extra.data or data) .. " using " .. tostring(writerResult) .. " via " .. tostring(method)) or ("Setup failed: " .. tostring(message)))
+end
+
 function setupWizard()
   while true do
     print()
@@ -4425,6 +4886,7 @@ function setupWizard()
     print("5. Add facility sensor")
     print("6. Add emergency button")
     print("7. Map reader to door")
+    print("8. Issue/write employee badge")
     print("B. Back")
     local choice = string.lower(tostring(promptLine("> ", "") or ""))
 
@@ -4456,6 +4918,8 @@ function setupWizard()
       setupConsoleAddEmergency()
     elseif choice == "7" then
       setupConsoleMapReader()
+    elseif choice == "8" then
+      setupConsoleIssueBadge()
     elseif choice == "b" then
       return
     end
@@ -4581,6 +5045,10 @@ function handleCommand(line)
   elseif command == "employee" then
     if requireAdmin() then
       handleEmployeeCommand(words)
+    end
+  elseif command == "badge" then
+    if requireAdmin() then
+      handleBadgeCommand(words)
     end
   elseif command == "save" then
     if requireAdmin() then
@@ -4947,6 +5415,39 @@ function kioskNetworkLoop()
   end
 end
 
+function kioskHandleRawRednetMessage(sender, message, protocol)
+  if protocol ~= rednetProtocol() then
+    return
+  end
+
+  local decoded, decodeErr = unwrapRednetMessage(message)
+  if decoded ~= nil then
+    message = decoded
+  elseif secureRednet.enabled(config.rednet) then
+    return
+  elseif decodeErr then
+    return
+  end
+
+  if type(message) == "string" then
+    local ok, value = pcall(textutils.unserialize, message)
+    message = ok and value or { op = message }
+  end
+
+  if type(message) == "table" then
+    if message.op == "alarm_state" then
+      kioskApplyAlarmMessage(message, sender)
+    elseif message.op == "notification" then
+      kioskApplyNotification(message.notification, sender, message)
+    else
+      kioskQueueMessage(sender, message)
+      if message.alarm or message.status then
+        kioskApplyAlarmMessage(message, sender)
+      end
+    end
+  end
+end
+
 function kioskAlarmSpeakerLoop()
   while state.kiosk.running do
     if state.alarm.active then
@@ -4960,6 +5461,45 @@ function kioskAlarmSpeakerLoop()
     end
     sleep(0.1)
   end
+end
+
+function kioskScanLocalBadge(timeout)
+  timeout = tonumber(timeout) or tonumber(config.kiosk and config.kiosk.badgeScanSeconds) or 8
+  local deadline = os.clock() + timeout
+  local timer = os.startTimer(0.2)
+
+  while os.clock() < deadline do
+    local scanned = scanRfidScannerCredentials() or scanGenericBadgeCredentials()
+    if scanned and scanned.candidates and #scanned.candidates > 0 then
+      return scanned
+    end
+
+    local event = { os.pullEventRaw() }
+    local name = event[1]
+    if name == "timer" and event[2] == timer then
+      timer = os.startTimer(0.2)
+    elseif name == "nfc_data" then
+      local source = event[2] or "nfc"
+      local data = tostring(event[3] or "")
+      if data ~= "" then
+        local candidates, meta = badgeAliases("nfc", data)
+        meta.source = source
+        return {
+          source = source,
+          kind = "nfc",
+          candidates = candidates,
+          meta = meta,
+          cooldown = "nfc:" .. tostring(source) .. ":" .. tostring(meta.id or data),
+        }
+      end
+    elseif name == "rednet_message" then
+      kioskHandleRawRednetMessage(event[2], event[3], event[4])
+    elseif name == "terminate" then
+      error("Terminated", 0)
+    end
+  end
+
+  return nil
 end
 
 function kioskRefreshServerStatus()
@@ -4988,6 +5528,7 @@ function kioskLogin(serverId, brand)
   while true do
     drawKioskHeader(brand)
     print("1. Sign in")
+    print("B. Scan badge")
     if brand.allowSelfRegistration then
       print("2. Create account")
     end
@@ -5006,6 +5547,25 @@ function kioskLogin(serverId, brand)
       end
       print("Denied: " .. tostring(reply.error))
       pause()
+    elseif choice == "b" then
+      print("Scan RFID/NFC badge now...")
+      local scanned = kioskScanLocalBadge()
+      if not scanned then
+        print("No badge detected.")
+        pause()
+      else
+        local reply = kioskRequest(serverId, "kiosk_badge_login", {
+          kind = scanned.kind,
+          source = scanned.source,
+          candidates = scanned.candidates,
+          meta = scanned.meta,
+        })
+        if reply.ok then
+          return reply.token, reply.user, reply.branding or brand
+        end
+        print("Denied: " .. tostring(reply.error))
+        pause()
+      end
     elseif choice == "2" and brand.allowSelfRegistration then
       local username = kioskRead("New username: ")
       local displayName = kioskRead("Display name: ")
@@ -5454,9 +6014,43 @@ function kioskSetupMapReader(serverId, token)
   pause()
 end
 
+function kioskSetupIssueBadge(serverId, token)
+  local username = kioskPromptLine("Employee username", "")
+  local data = kioskPromptLine("Badge data blank=generate", "")
+  if data == "" or data == nil then
+    data = makeId("badge")
+  end
+  local writer = kioskPromptLine("NFC writer blank=auto", "")
+  local doorAccess = kioskPromptLine("Door access blank=login only, *=all, comma=list", "")
+
+  print("Place card on NFC writer.")
+  local okWrite, writerResult, method = writeNfcBadgeData(data, writer)
+  if not okWrite then
+    print("Write failed: " .. tostring(writerResult))
+    pause()
+    return
+  end
+
+  local reply = kioskSetupRequest(serverId, token, {
+    action = "issue_badge",
+    username = username,
+    data = data,
+    doorAccess = doorAccess,
+  })
+  if reply.ok then
+    print("Issued badge " .. tostring(reply.data or data))
+    print("Writer: " .. tostring(writerResult) .. " via " .. tostring(method))
+  else
+    print("Server update failed: " .. tostring(reply.error))
+  end
+  pause()
+end
+
 function kioskSetupMenu(serverId, brand, token, user)
   while true do
     drawKioskHeader(brand, user)
+    local issueClearance = brand.permissions and tonumber(brand.permissions.issueBadges) or 5
+    local canIssueBadges = issueClearance == nil or (tonumber(user.clearance) or 0) >= issueClearance
     print("Facility Setup")
     print("1. Summary")
     print("2. Scan server peripherals")
@@ -5465,6 +6059,9 @@ function kioskSetupMenu(serverId, brand, token, user)
     print("5. Add facility sensor")
     print("6. Add emergency button")
     print("7. Map reader to door")
+    if canIssueBadges then
+      print("8. Issue/write employee badge")
+    end
     print("B. Back")
 
     local choice = string.lower(kioskRead("> "))
@@ -5502,6 +6099,8 @@ function kioskSetupMenu(serverId, brand, token, user)
       kioskSetupAddEmergency(serverId, token)
     elseif choice == "7" then
       kioskSetupMapReader(serverId, token)
+    elseif choice == "8" and canIssueBadges then
+      kioskSetupIssueBadge(serverId, token)
     elseif choice == "b" then
       return true
     end
@@ -5748,6 +6347,7 @@ function controllerMain()
   print("Waiting for server endpoint requests.")
   broadcastControllerHello()
   local helloTimer = os.startTimer(30)
+  local scanTimer = os.startTimer(0.25)
 
   while true do
     local event = { os.pullEventRaw() }
@@ -5757,9 +6357,25 @@ function controllerMain()
     elseif name == "timer" and event[2] == helloTimer then
       broadcastControllerHello()
       helloTimer = os.startTimer(30)
+    elseif name == "timer" and event[2] == scanTimer then
+      controllerPollLocalCredentials()
+      scanTimer = os.startTimer(0.25)
     elseif name == "peripheral" or name == "peripheral_detach" then
       openRednet()
       broadcastControllerHello()
+    elseif name == "nfc_data" then
+      local source = event[2] or "nfc"
+      local data = tostring(event[3] or "")
+      if data ~= "" then
+        local candidates, meta = badgeAliases("nfc", data)
+        meta.source = source
+        sendControllerCredential({
+          source = source,
+          kind = "nfc",
+          candidates = candidates,
+          meta = meta,
+        })
+      end
     elseif name == "rednet_message" then
       local sender = event[2]
       local message = event[3]

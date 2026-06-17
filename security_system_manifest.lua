@@ -69,6 +69,8 @@ return {
         "security_system_announcements",
         "function controllerMain()",
         "kiosk_setup",
+        "kiosk_badge_login",
+        "controller_credential",
         "function main()",
         "return {",
       },
