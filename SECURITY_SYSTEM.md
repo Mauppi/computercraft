@@ -122,12 +122,15 @@ High-clearance kiosks can do the same from `Facility setup` -> `Issue/write empl
 
 Kiosk sign-in supports attached `rfid_scanner` peripherals and generic NFC/card reader methods. Use `Scan badge` on the sign-in screen; the kiosk sends the scanned credential candidates to the server, and the server only creates a session if the badge is assigned to an employee.
 
+The setup wizard now prints `Reader sources to map` after scanning a server or door controller. Use one of those exact strings when adding a door or mapping a reader. A server-attached NFC reader is usually just `nfc_reader_0`; a reader attached to door controller computer `23` is `controller:23:nfc_reader_0`. If the wizard suggests a source but you do not want to map it yet, enter `none`, `skip`, or `-`.
+
 Recommended door scanner layout:
 
 - Put the main server computer somewhere safe and keep the employee accounts, badge assignments, logs, and config there.
 - Put a door controller computer near every door, or near a small cluster of nearby doors. Attach redstone integrators, lock outputs, door contact sensors, request-exit buttons, NFC/RFID readers, and emergency buttons to that local controller where possible.
 - Run `security_system controller` on each door controller and use the setup wizard from the server or an authorized kiosk to scan that controller and add/update the doors.
 - Map each scanner source to the door it controls. Server-attached scanners use their peripheral name, such as `rfid_scanner_0`. Door-controller scanners are forwarded as `controller:<computerId>:<peripheral>`, such as `controller:23:rfid_scanner_0`.
+- NFC/card reader methods are matched as NFC credentials too, so a card containing `ABC123` can authorize config entries like `nfc:ABC123`, `badge:ABC123`, or raw `ABC123`.
 - Use RFID scanners for hands-free or area badge reads, and NFC readers/writers for issuing cards and deliberate tap-to-open points. Keep kiosk RFID scanners for employee login/admin setup, not as the primary door unlock path unless the kiosk is physically at that doorway.
 - Prefer one scanner source per door side when possible: outside reader opens the door, inside request-exit button opens the door, contact sensor detects forced-open state.
 
@@ -251,6 +254,20 @@ announcements = {
         "announcements/lockdown_1.wav",
         "announcements/lockdown_2.wav",
       },
+    },
+    layered_warning = {
+      mix = {
+        { wav = "announcements/jingle_alarm.wav", volume = 0.8 },
+        { wav = "announcements/vo_attention.wav", offsetSeconds = 0.25 },
+        { wav = "announcements/vo_lockdown.wav", offsetSeconds = 0.95 },
+      },
+    },
+    overlapped_segments = {
+      files = {
+        "announcements/vo_alarm.wav",
+        "announcements/vo_engaged.wav",
+      },
+      overlapSeconds = 0.04,
     },
   },
   jingles = {

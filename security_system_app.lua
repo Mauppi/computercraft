@@ -65,6 +65,9 @@ local state = {
   announcements = {
     index = 0,
     cooldowns = {},
+    audioStreams = {},
+    audioGeneration = 0,
+    audioPlayingUntil = 0,
   },
   sensorDetails = {},
   alarm = {
@@ -375,7 +378,7 @@ function installKioskConfigIfMissing()
   handle.writeLine("  configSync = { enabled = true, includeAlarm = true },")
   handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = true, volume = 1, sampleRate = 48000, maxSamples = 128000, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 128000, streamGraceSeconds = 6, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
@@ -1971,6 +1974,180 @@ function playAlarmAudioSound(profile, sound, speaker, speakerName)
   return playAlarmBuffer(profile, speaker, buffer, tonumber(volume) or tonumber(profile.volume) or tonumber(dsp.volume) or 1, speakerName)
 end
 
+function announcementAudioConfig()
+  local announcements = config.announcements or {}
+  local audio = type(announcements.audio) == "table" and announcements.audio or {}
+  return {
+    sampleRate = audio.sampleRate or announcements.sampleRate or 48000,
+    chunkSamples = audio.chunkSamples or announcements.chunkSamples or audio.playbackSamples or announcements.playbackSamples or announcements.maxSamples or 128000,
+    volume = announcements.volume or audio.volume or 1,
+    streamGraceSeconds = announcements.streamGraceSeconds or audio.streamGraceSeconds or 6,
+  }
+end
+
+function announcementPlaybackChunkSize()
+  local audioConfig = announcementAudioConfig()
+  local chunkSamples = tonumber(audioConfig.chunkSamples) or 128000
+  if chunkSamples <= 0 then
+    chunkSamples = 128000
+  end
+  chunkSamples = math.floor(chunkSamples)
+  if chunkSamples < 1024 then
+    return 1024
+  end
+  if chunkSamples > 128000 then
+    return 128000
+  end
+  return chunkSamples
+end
+
+function clearAnnouncementAudioStreams()
+  state.announcements.audioStreams = {}
+  state.announcements.audioPlayingUntil = 0
+  state.announcements.audioGeneration = (state.announcements.audioGeneration or 0) + 1
+end
+
+function announcementAudioBusy()
+  local now = os.clock()
+  for name, stream in pairs(state.announcements.audioStreams or {}) do
+    if stream.generation ~= state.announcements.audioGeneration or (stream.deadline and now > stream.deadline) then
+      state.announcements.audioStreams[name] = nil
+    end
+  end
+  if (tonumber(state.announcements.audioPlayingUntil) or 0) > os.clock() then
+    return true
+  end
+  for _ in pairs(state.announcements.audioStreams or {}) do
+    return true
+  end
+  return false
+end
+
+function announcementFeedSpeakerStream(speakerName)
+  if state.alarm.active or alarmAudioBusy() then
+    state.announcements.audioStreams = {}
+    return false
+  end
+
+  local stream = state.announcements.audioStreams and state.announcements.audioStreams[speakerName]
+  if not stream then
+    return false
+  end
+  if stream.generation ~= state.announcements.audioGeneration then
+    state.announcements.audioStreams[speakerName] = nil
+    return false
+  end
+  if not (stream.speaker and stream.speaker.playAudio) then
+    state.announcements.audioStreams[speakerName] = nil
+    return false
+  end
+
+  while stream.nextIndex <= #stream.pcm do
+    local chunk = {}
+    local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
+    for index = stream.nextIndex, last do
+      chunk[#chunk + 1] = clampSample(stream.pcm[index])
+    end
+
+    local ok, accepted = pcall(stream.speaker.playAudio, chunk, stream.volume)
+    if not ok then
+      state.announcements.audioStreams[speakerName] = nil
+      return false
+    end
+    if accepted == false then
+      return false
+    end
+
+    stream.nextIndex = last + 1
+    stream.lastQueuedAt = os.clock()
+  end
+
+  state.announcements.audioStreams[speakerName] = nil
+  return true
+end
+
+function handleAnnouncementSpeakerAudioEmpty(speakerName)
+  if type(speakerName) ~= "string" then
+    return false
+  end
+  return announcementFeedSpeakerStream(speakerName)
+end
+
+function startAnnouncementAudioStream(speakerName, speaker, pcm, volume)
+  if state.alarm.active or alarmAudioBusy() then
+    return false
+  end
+  if not (speaker and speaker.playAudio and type(pcm) == "table" and #pcm > 0) then
+    return false
+  end
+
+  local audioConfig = announcementAudioConfig()
+  local sampleRate = tonumber(audioConfig.sampleRate) or 48000
+  if sampleRate <= 0 then
+    sampleRate = 48000
+  end
+  local duration = #pcm / sampleRate
+  state.announcements.audioPlayingUntil = math.max(tonumber(state.announcements.audioPlayingUntil) or 0, os.clock() + duration)
+  state.announcements.audioStreams = state.announcements.audioStreams or {}
+  state.announcements.audioStreams[speakerName] = {
+    speaker = speaker,
+    pcm = pcm,
+    volume = volume,
+    nextIndex = 1,
+    chunkSamples = announcementPlaybackChunkSize(),
+    generation = state.announcements.audioGeneration or 0,
+    deadline = os.clock() + duration + (tonumber(audioConfig.streamGraceSeconds) or 6),
+  }
+
+  local queued = announcementFeedSpeakerStream(speakerName)
+  return queued or state.announcements.audioStreams[speakerName] ~= nil
+end
+
+function announcementFallbackSounds(announcement)
+  local announcements = config.announcements or {}
+  local kind = tostring((announcement and (announcement.kind or announcement.type)) or "")
+  if (kind == "alarm" or kind == "emergency" or kind == "lockdown") and type(announcements.alarmFallbackSounds) == "table" then
+    return announcements.alarmFallbackSounds
+  end
+  return announcements.fallbackSounds or {
+    { name = "minecraft:block.note_block.chime", volume = 1.4, pitch = 0.9 },
+    { name = "minecraft:block.note_block.bell", volume = 1.0, pitch = 1.25 },
+  }
+end
+
+function playFacilityAnnouncement(announcement)
+  local announcements = config.announcements or {}
+  if announcements.enabled == false or announcements.sound == false then
+    return false
+  end
+  if state.alarm.active or alarmAudioBusy() then
+    return false
+  end
+
+  local pcm = facilityAnnouncements.buildAnnouncementBuffer(announcement, announcements)
+  clearAnnouncementAudioStreams()
+  local volume = tonumber(announcements.volume) or 1
+  local played = false
+  if type(pcm) == "table" and #pcm > 0 then
+    for _, entry in ipairs(findSpeakerEntries()) do
+      if startAnnouncementAudioStream(entry.name, entry.speaker, pcm, volume) then
+        played = true
+      end
+    end
+  end
+
+  if not played then
+    for _, speaker in ipairs(findSpeakers()) do
+      if speaker.playSound then
+        for _, sound in ipairs(announcementFallbackSounds(announcement)) do
+          pcall(speaker.playSound, sound.name, sound.volume or 1, sound.pitch or 1)
+        end
+      end
+    end
+  end
+  return played
+end
+
 function playDspAlarm(profile, speaker)
   if not (speaker and speaker.playAudio) then
     return false
@@ -2083,6 +2260,7 @@ function raiseAlarm(reason, doorId, actor, profileName)
     if profileName == "emergency" and state.alarm.profile ~= "emergency" then
       setAlarmOutputs(false)
       clearAlarmAudioStreams(true)
+      clearAnnouncementAudioStreams()
       state.alarm.reason = reason or "emergency"
       state.alarm.door = doorId
       state.alarm.actor = actor
@@ -2133,6 +2311,7 @@ function raiseAlarm(reason, doorId, actor, profileName)
   state.alarm.soundStartAt = state.alarm.sinceMillis + alarmSyncLeadMillis(alarmProfile(profileName))
   state.alarm.soundIndex = 1
   clearAlarmAudioStreams(true)
+  clearAnnouncementAudioStreams()
 
   local profile = alarmProfile(profileName)
   broadcastAlarmState()
@@ -2608,26 +2787,159 @@ local genericBadgeMethods = {
   "getBadge",
   "readBadge",
   "scanBadge",
+  "getLastBadge",
   "getCard",
   "readCard",
+  "scanCard",
   "getCardData",
+  "readCardData",
+  "getLastCard",
   "getRFID",
   "readRFID",
+  "scanRFID",
+  "getRfid",
+  "readRfid",
+  "scanRfid",
   "getNFC",
   "readNFC",
+  "scanNFC",
   "getNfc",
   "readNfc",
+  "scanNfc",
   "getNfcData",
   "readNfcData",
-  "getLastBadge",
+  "getTag",
+  "readTag",
+  "scanTag",
+  "getLastTag",
+  "getUID",
+  "readUID",
+  "getUid",
+  "readUid",
+  "getData",
+  "readData",
+  "read",
+  "scan",
 }
 
-function candidatesFromValue(value)
+local genericCredentialMethods = {
+  getData = true,
+  readData = true,
+  read = true,
+  scan = true,
+}
+
+function textContainsAny(text, words)
+  text = string.lower(tostring(text or ""))
+  for _, word in ipairs(words) do
+    if string.find(text, tostring(word), 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+function credentialReaderHintText(name)
+  local parts = { tostring(name or "") }
+  if peripheral and peripheral.getType then
+    for _, typeName in ipairs({ peripheral.getType(name) }) do
+      if typeName then
+        table.insert(parts, tostring(typeName))
+      end
+    end
+  end
+  return table.concat(parts, " ")
+end
+
+function likelyCredentialReaderName(name)
+  return textContainsAny(credentialReaderHintText(name), { "nfc", "rfid", "badge", "card", "reader", "scanner" })
+end
+
+function methodLooksCredentialSpecific(method)
+  return textContainsAny(method, { "badge", "card", "rfid", "nfc", "tag", "uid" })
+end
+
+function shouldUseCredentialMethod(name, method)
+  if methodLooksCredentialSpecific(method) then
+    return true
+  end
+  if genericCredentialMethods[tostring(method)] then
+    return likelyCredentialReaderName(name)
+  end
+  return false
+end
+
+function hasCredentialReaderMethod(name, methodSet)
+  if hasPeripheralType(name, "rfid_scanner") then
+    return true
+  end
+
+  for _, method in ipairs(genericBadgeMethods) do
+    if methodSet[method] and shouldUseCredentialMethod(name, method) then
+      return true
+    end
+  end
+
+  return false
+end
+
+function readerKindFor(name, method, value)
+  local hint = credentialReaderHintText(name) .. " " .. tostring(method or "")
+  if type(value) == "table" then
+    for key in pairs(value) do
+      hint = hint .. " " .. tostring(key)
+    end
+  end
+
+  if textContainsAny(hint, { "rfid" }) then
+    return "rfid"
+  end
+  if textContainsAny(hint, { "nfc", "card", "tag", "uid" }) then
+    return "nfc"
+  end
+  return "badge"
+end
+
+function credentialKindForKey(defaultKind, key)
+  local lower = string.lower(tostring(key or ""))
+  if lower == "rfid" then
+    return "rfid"
+  end
+  if lower == "nfc" or lower == "card" or lower == "tag" or lower == "uid" then
+    return "nfc"
+  end
+  return defaultKind or "badge"
+end
+
+function appendCredentialAliases(candidates, meta, kind, value, key)
+  local keyText = key and tostring(key) or nil
+  local keyLower = keyText and string.lower(keyText) or nil
+  if keyLower == "label" or keyLower == "name" or keyLower == "owner" then
+    meta[keyText] = tostring(value)
+    appendUnique(candidates, keyText .. ":" .. tostring(value))
+    appendUnique(candidates, tostring(value))
+    return
+  end
+
+  local aliases, aliasMeta = badgeAliases(kind or "badge", value)
+  for _, candidate in ipairs(aliases) do
+    appendUnique(candidates, candidate)
+  end
+  if keyText then
+    meta[keyText] = tostring(value)
+    appendUnique(candidates, keyText .. ":" .. tostring(value))
+  end
+  meta.id = meta.id or aliasMeta.id
+  meta.kind = meta.kind or aliasMeta.kind
+end
+
+function candidatesFromValue(value, kind)
+  kind = kind or "badge"
   local candidates = {}
   local meta = {}
 
   if type(value) == "string" or type(value) == "number" then
-    candidates, meta = badgeAliases("badge", value)
+    candidates, meta = badgeAliases(kind, value)
     return candidates, meta
   end
 
@@ -2642,6 +2954,12 @@ function candidatesFromValue(value)
     "code",
     "badge",
     "card",
+    "nfc",
+    "rfid",
+    "uid",
+    "tag",
+    "data",
+    "value",
     "label",
     "name",
     "owner",
@@ -2650,16 +2968,21 @@ function candidatesFromValue(value)
   for _, key in ipairs(keys) do
     local item = value[key]
     if type(item) == "string" or type(item) == "number" then
-      meta[key] = tostring(item)
-      appendUnique(candidates, key .. ":" .. tostring(item))
-      appendUnique(candidates, tostring(item))
-      if key == "id" or key == "uuid" or key == "serial" or key == "code" or key == "badge" then
-        appendUnique(candidates, "badge:" .. tostring(item))
+      appendCredentialAliases(candidates, meta, credentialKindForKey(kind, key), item, key)
+    end
+  end
+
+  if #candidates == 0 then
+    for _, item in ipairs(value) do
+      local nestedCandidates, nestedMeta = candidatesFromValue(item, kind)
+      if #nestedCandidates > 0 then
+        return nestedCandidates, nestedMeta
       end
     end
   end
 
   meta.name = meta.name or meta.label or meta.owner or meta.id or meta.uuid or meta.serial or candidates[1]
+  meta.kind = meta.kind or kind
   return candidates, meta
 end
 
@@ -2718,20 +3041,22 @@ function scanGenericBadgeCredentials()
     if not isDrive(name) then
       local methods = methodMap(name)
       for _, method in ipairs(genericBadgeMethods) do
-        if methods[method] then
+        if methods[method] and shouldUseCredentialMethod(name, method) then
           local device = peripheral.wrap(name)
           if device and device[method] then
             local ok, value = pcall(device[method])
             if ok and value ~= nil and value ~= false then
-              local candidates, meta = candidatesFromValue(value)
+              local kind = readerKindFor(name, method, value)
+              local candidates, meta = candidatesFromValue(value, kind)
               if #candidates > 0 then
                 meta.source = name
+                meta.method = method
                 return {
                   source = name,
-                  kind = "badge",
+                  kind = kind,
                   candidates = candidates,
                   meta = meta,
-                  cooldown = "badge:" .. name .. ":" .. tostring(meta.id or candidates[1]),
+                  cooldown = kind .. ":" .. name .. ":" .. tostring(meta.id or candidates[1]),
                 }
               end
             end
@@ -2750,14 +3075,16 @@ function pollGenericBadgeReaders()
     if not isDrive(name) then
       local methods = methodMap(name)
       for _, method in ipairs(genericBadgeMethods) do
-        if methods[method] then
+        if methods[method] and shouldUseCredentialMethod(name, method) then
           local device = peripheral.wrap(name)
           if device and device[method] then
             local ok, value = pcall(device[method])
             if ok and value ~= nil and value ~= false then
-              local candidates, meta = candidatesFromValue(value)
+              local kind = readerKindFor(name, method, value)
+              local candidates, meta = candidatesFromValue(value, kind)
               if #candidates > 0 then
-                handleCredentials(name, "badge", candidates, meta, "badge:" .. name)
+                meta.method = method
+                handleCredentials(name, kind, candidates, meta, kind .. ":" .. name)
               end
             end
           end
@@ -3295,6 +3622,7 @@ function peripheralSummary()
       name = name,
       types = types,
       methods = methods,
+      reader = hasCredentialReaderMethod(name, methodSet),
     })
   end
 
@@ -4092,6 +4420,134 @@ function setupScanController(controller)
     return true, reply
   end
   return false, err or "scan failed"
+end
+
+function methodSetFromList(methods)
+  local out = {}
+  if type(methods) == "table" then
+    for _, method in ipairs(methods) do
+      out[tostring(method)] = true
+    end
+  end
+  return out
+end
+
+function peripheralItemHintText(item)
+  local parts = { tostring(item and item.name or "") }
+  if type(item) == "table" and type(item.types) == "table" then
+    for _, typeName in ipairs(item.types) do
+      table.insert(parts, tostring(typeName))
+    end
+  elseif type(item) == "table" and item.types then
+    table.insert(parts, tostring(item.types))
+  end
+  if type(item) == "table" and type(item.methods) == "table" then
+    for _, method in ipairs(item.methods) do
+      table.insert(parts, tostring(method))
+    end
+  end
+  return table.concat(parts, " ")
+end
+
+function peripheralItemLooksCredentialReader(item)
+  if type(item) ~= "table" then
+    return false
+  end
+  if item.reader == true then
+    return true
+  end
+
+  local hint = peripheralItemHintText(item)
+  if textContainsAny(hint, { "nfc", "rfid", "badge", "card" }) then
+    return true
+  end
+
+  local methodSet = methodSetFromList(item.methods)
+  for _, method in ipairs(genericBadgeMethods) do
+    if methodSet[method] then
+      if methodLooksCredentialSpecific(method) then
+        return true
+      end
+      if genericCredentialMethods[method] and textContainsAny(hint, { "reader", "scanner" }) then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+function readerSourceForController(controller, peripheralName)
+  local controllerText = tostring(controller or "")
+  if controllerText == "" or controllerText == "server" or controllerText == "local" then
+    return tostring(peripheralName or "")
+  end
+  return "controller:" .. controllerText .. ":" .. tostring(peripheralName or "")
+end
+
+function readerSourcesFromSummary(items, controller)
+  local out = {}
+  local seen = {}
+  if type(items) ~= "table" then
+    return out
+  end
+
+  for _, item in ipairs(items) do
+    if item and item.name and peripheralItemLooksCredentialReader(item) then
+      local source = readerSourceForController(controller, item.name)
+      if source ~= "" and not seen[source] then
+        seen[source] = true
+        table.insert(out, {
+          name = item.name,
+          source = source,
+          types = item.types,
+        })
+      end
+    end
+  end
+  return out
+end
+
+function normalizeReaderSourceInput(value)
+  local text = tostring(value or "")
+  local lower = string.lower(text)
+  if lower == "none" or lower == "skip" or lower == "-" then
+    return ""
+  end
+  return text
+end
+
+function printReaderSourceHints(items, controller)
+  local readers = readerSourcesFromSummary(items, controller)
+  if #readers == 0 then
+    print("No likely NFC/RFID/card readers reported.")
+    if controller and controller ~= "" and controller ~= "server" and controller ~= "local" then
+      print("Manual format: controller:" .. tostring(controller) .. ":<peripheral>")
+    else
+      print("Manual format: <server peripheral>, for example nfc_reader_0")
+    end
+    return nil
+  end
+
+  print("Reader sources to map:")
+  for _, reader in ipairs(readers) do
+    local types = type(reader.types) == "table" and table.concat(reader.types, ",") or tostring(reader.types or "?")
+    print("  " .. truncate(reader.source, 48) .. " [" .. truncate(types, 18) .. "]")
+  end
+  return readers[1].source
+end
+
+function setupReaderSourceHints(controller)
+  print("Scanning for NFC/RFID/card readers...")
+  local ok, scan = setupScanController(controller)
+  local sourceController = controller
+  if sourceController == nil or sourceController == "" or sourceController == "server" or sourceController == "local" or tostring(sourceController) == tostring(localComputerId() or "") then
+    sourceController = "server"
+  end
+  if ok then
+    return printReaderSourceHints(scan.peripherals or {}, sourceController), scan
+  end
+  print("Reader scan failed: " .. tostring(scan))
+  return nil, nil
 end
 
 function saveSetupChange(actor, action, detail)
@@ -5801,7 +6257,8 @@ function setupConsoleAddDoor()
     payload.requestExit = promptEndpoint("Exit button input endpoint", config.setup.defaultExitSide or "right", controller)
     payload.exitActiveWhen = promptBool("Exit input active when pressed", true)
   end
-  payload.reader = promptLine("Reader source to map blank=skip", "")
+  local defaultReader = setupReaderSourceHints(controller)
+  payload.reader = normalizeReaderSourceInput(promptLine("Reader source to map type none=skip", defaultReader or ""))
 
   local ok, message = handleSetupAction(payload, "console")
   print(ok and tostring(message) or ("Setup failed: " .. tostring(message)))
@@ -5854,9 +6311,11 @@ function setupConsoleAddEmergency()
 end
 
 function setupConsoleMapReader()
+  local controller = promptLine("Controller id blank/server=server", "server")
+  local defaultReader = setupReaderSourceHints(controller)
   local payload = {
     action = "map_reader",
-    source = promptLine("Reader source/peripheral name", ""),
+    source = normalizeReaderSourceInput(promptLine("Reader source", defaultReader or "")),
     door = promptLine("Door id", ""),
   }
   local ok, message = handleSetupAction(payload, "console")
@@ -5976,13 +6435,20 @@ function setupWizard()
       end
       print("Sensors: " .. tostring(#(summary.sensors or {})) .. ", emergency buttons: " .. tostring(#(summary.emergencyButtons or {})))
     elseif choice == "2" then
-      printPeripheralSummary(peripheralSummary())
+      local items = peripheralSummary()
+      printPeripheralSummary(items)
+      printReaderSourceHints(items, "server")
     elseif choice == "3" then
       local controller = promptLine("Controller computer id", "")
       local ok, scan = setupScanController(controller)
       if ok then
+        local sourceController = controller
+        if sourceController == nil or sourceController == "" or sourceController == "server" or sourceController == "local" or tostring(sourceController) == tostring(localComputerId() or "") then
+          sourceController = "server"
+        end
         print("Controller: " .. tostring(scan.controllerId or controller or "server"))
         printPeripheralSummary(scan.peripherals or {})
+        printReaderSourceHints(scan.peripherals or {}, sourceController)
       else
         print("Scan failed: " .. tostring(scan))
       end
@@ -6306,7 +6772,7 @@ function kioskApplyNotification(notification, sender, envelope)
     if item.alarm and (item.kind == "alarm" or item.kind == "emergency") then
       kioskApplyAlarmMessage({ alarm = item.alarm }, sender)
     elseif item.announcement == true or item.kind == "announcement" or item.kind == "alarm" or item.kind == "emergency" or item.kind == "lockdown" then
-      facilityAnnouncements.play(findSpeakers(), item, config.announcements or {})
+      playFacilityAnnouncement(item)
     else
       kioskNotifications.playSound(findSpeakers(), item, config)
     end
@@ -6573,7 +7039,9 @@ end
 function alarmAudioStreamLoop()
   while state.running or state.kiosk.running do
     local event = { os.pullEventRaw("speaker_audio_empty") }
-    handleAlarmSpeakerAudioEmpty(event[2])
+    if not handleAlarmSpeakerAudioEmpty(event[2]) then
+      handleAnnouncementSpeakerAudioEmpty(event[2])
+    end
   end
 end
 
@@ -7037,12 +7505,43 @@ function kioskDefaultController()
   return "server"
 end
 
-function kioskReaderSourcePrompt(defaultPeripheral)
-  if kioskControllerEnabled() and kioskPromptBool("Use reader attached to this kiosk/controller", true) then
-    local peripheralName = kioskPromptLine("  Local reader peripheral", defaultPeripheral or "rfid_scanner_0")
-    return controllerCredentialSource(peripheralName)
+function defaultLocalReaderPeripheral(defaultPeripheral)
+  local readers = readerSourcesFromSummary(peripheralSummary(), "")
+  if #readers > 0 then
+    return readers[1].name
   end
-  return kioskPromptLine("Reader source", "")
+  return defaultPeripheral or "nfc_reader_0"
+end
+
+function kioskReaderSourcePrompt(defaultPeripheral, controller, defaultSource)
+  if defaultSource and defaultSource ~= "" then
+    return normalizeReaderSourceInput(kioskPromptLine("Reader source type none=skip", defaultSource))
+  end
+
+  if kioskControllerEnabled() then
+    print("Local reader source format:")
+    print("  " .. controllerCredentialSource("<peripheral>"))
+    local preferLocal = controller == nil or controller == "" or tostring(controller) == kioskControllerId()
+    if kioskPromptBool("Use reader attached to this kiosk/controller", preferLocal) then
+      local peripheralName = kioskPromptLine("  Local reader peripheral", defaultLocalReaderPeripheral(defaultPeripheral))
+      return normalizeReaderSourceInput(controllerCredentialSource(peripheralName))
+    end
+  end
+
+  print("Reader source examples:")
+  print("  server: nfc_reader_0")
+  print("  controller:23:nfc_reader_0")
+  return normalizeReaderSourceInput(kioskPromptLine("Reader source type none=skip", ""))
+end
+
+function kioskSetupReaderHints(serverId, token, controller)
+  print("Scanning for NFC/RFID/card readers...")
+  local reply = kioskSetupRequest(serverId, token, { action = "scan", controller = controller })
+  if reply.ok then
+    return kioskPrintPeripheralSummary((reply.scan or {}).peripherals or {}, controller)
+  end
+  print("Reader scan failed: " .. tostring(reply.error))
+  return nil
 end
 
 function saveKioskControllerSetting(enabled)
@@ -7090,7 +7589,9 @@ function kioskLocalControllerSetup()
       print("Local controller mode disabled.")
       pause()
     elseif choice == "3" then
-      printPeripheralSummary(peripheralSummary())
+      local items = peripheralSummary()
+      printPeripheralSummary(items)
+      printReaderSourceHints(items, kioskControllerId())
       pause()
     elseif choice == "b" then
       return
@@ -7153,8 +7654,9 @@ function kioskPrintSetupSummary(summary)
   print("Emergency buttons: " .. tostring(#(summary.emergencyButtons or {})))
 end
 
-function kioskPrintPeripheralSummary(items)
+function kioskPrintPeripheralSummary(items, controller)
   printPeripheralSummary(items)
+  return printReaderSourceHints(items, controller or "server")
 end
 
 function kioskSetupAddDoor(serverId, token)
@@ -7177,7 +7679,8 @@ function kioskSetupAddDoor(serverId, token)
     payload.requestExit = kioskEndpointPrompt("Exit button endpoint", "right", controller)
     payload.exitActiveWhen = kioskPromptBool("Exit active when pressed", true)
   end
-  payload.reader = kioskReaderSourcePrompt("rfid_scanner_0")
+  local defaultReader = kioskSetupReaderHints(serverId, token, controller)
+  payload.reader = kioskReaderSourcePrompt("nfc_reader_0", controller, defaultReader)
 
   local reply = kioskSetupRequest(serverId, token, payload)
   print(reply.ok and tostring(reply.message or "Saved.") or ("Denied/failed: " .. tostring(reply.error)))
@@ -7233,9 +7736,11 @@ function kioskSetupAddEmergency(serverId, token)
 end
 
 function kioskSetupMapReader(serverId, token)
+  local controller = kioskPromptLine("Controller id blank/server=server", kioskDefaultController())
+  local defaultReader = kioskSetupReaderHints(serverId, token, controller)
   local reply = kioskSetupRequest(serverId, token, {
     action = "map_reader",
-    source = kioskReaderSourcePrompt("rfid_scanner_0"),
+    source = kioskReaderSourcePrompt("nfc_reader_0", controller, defaultReader),
     door = kioskPromptLine("Door id", ""),
   })
   print(reply.ok and tostring(reply.message or "Saved.") or ("Denied/failed: " .. tostring(reply.error)))
@@ -7372,7 +7877,7 @@ function kioskSetupMenu(serverId, brand, token, user)
     elseif choice == "2" then
       local reply = kioskSetupRequest(serverId, token, { action = "scan", controller = "server" })
       if reply.ok then
-        kioskPrintPeripheralSummary((reply.scan or {}).peripherals or {})
+        kioskPrintPeripheralSummary((reply.scan or {}).peripherals or {}, "server")
       else
         print("Scan failed: " .. tostring(reply.error))
       end
@@ -7382,7 +7887,7 @@ function kioskSetupMenu(serverId, brand, token, user)
       local reply = kioskSetupRequest(serverId, token, { action = "scan", controller = controller })
       if reply.ok then
         print("Controller: " .. tostring((reply.scan or {}).controllerId or controller))
-        kioskPrintPeripheralSummary((reply.scan or {}).peripherals or {})
+        kioskPrintPeripheralSummary((reply.scan or {}).peripherals or {}, controller)
       else
         print("Scan failed: " .. tostring(reply.error))
       end

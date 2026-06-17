@@ -55,6 +55,23 @@ local function appendSamples(buffer, samples)
   end
 end
 
+local function mixSamplesAt(buffer, samples, startIndex, gain)
+  if type(samples) ~= "table" then
+    return
+  end
+
+  startIndex = math.max(1, math.floor(tonumber(startIndex) or 1))
+  gain = tonumber(gain) or 1
+  for index = 1, #samples do
+    local target = startIndex + index - 1
+    buffer[target] = clamp((buffer[target] or 0) + (samples[index] * gain))
+  end
+end
+
+local function secondsToSamples(seconds, config)
+  return math.floor((tonumber(seconds) or 0) * targetRate(config) + 0.5)
+end
+
 local function readFileAt(path)
   path = tostring(path or "")
   if path == "" then
@@ -314,11 +331,6 @@ end
 
 local samplesFromSpec
 
-local function appendSpec(buffer, spec, config, alarmLike)
-  local samples = samplesFromSpec(spec, config, alarmLike)
-  appendSamples(buffer, samples)
-end
-
 samplesFromSpec = function(spec, config, alarmLike)
   if type(spec) == "string" then
     return M.loadWav(spec, config)
@@ -339,11 +351,58 @@ samplesFromSpec = function(spec, config, alarmLike)
     end
   end
 
+  local layers = spec.mix or spec.layers or spec.overlay or spec.overlays
+  if type(layers) == "table" then
+    local buffer = {}
+    local cursor = 1
+    local defaultOverlap = secondsToSamples(spec.overlapSeconds or spec.overlap, config)
+    for index, layer in ipairs(layers) do
+      local layerSpec = layer
+      if type(layer) == "table" and (layer.sound or layer.spec or layer.source) then
+        layerSpec = layer.sound or layer.spec or layer.source
+      end
+
+      local samples = samplesFromSpec(layerSpec, config, alarmLike)
+      if samples and #samples > 0 then
+        local startIndex = nil
+        if type(layer) == "table" then
+          startIndex = layer.offsetSamples or layer.startSamples
+          if not startIndex then
+            local seconds = layer.offsetSeconds or layer.startSeconds or layer.atSeconds or layer.offset or layer.startAt
+            if seconds ~= nil then
+              startIndex = secondsToSamples(seconds, config) + 1
+            end
+          end
+        end
+        if not startIndex then
+          if index == 1 then
+            startIndex = 1
+          else
+            startIndex = math.max(1, cursor - defaultOverlap)
+          end
+        end
+
+        local gain = type(layer) == "table" and (layer.gain or layer.volume) or nil
+        mixSamplesAt(buffer, samples, startIndex, gain)
+        cursor = math.max(cursor, startIndex + #samples)
+      end
+    end
+    if #buffer > 0 then
+      return buffer
+    end
+  end
+
   local parts = spec.files or spec.parts or spec.segments
   if type(parts) == "table" then
     local buffer = {}
+    local overlap = secondsToSamples(spec.overlapSeconds or spec.overlap, config)
     for _, part in ipairs(parts) do
-      appendSpec(buffer, part, config, alarmLike)
+      local samples = samplesFromSpec(part, config, alarmLike)
+      if overlap > 0 and #buffer > 0 then
+        mixSamplesAt(buffer, samples, math.max(1, #buffer - overlap + 1), type(part) == "table" and (part.gain or part.volume) or nil)
+      else
+        appendSamples(buffer, samples)
+      end
     end
     return buffer
   end
