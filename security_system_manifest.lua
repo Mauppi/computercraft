@@ -123,6 +123,8 @@ return {
         "security_system_manifest.lua",
         "INSTALL_SUBDIR",
         "selectInstallRoot",
+        "modeOverride",
+        "copyKioskConfigIfMissing",
         "installServerConfigIfMissing",
         "serverConfig",
       },

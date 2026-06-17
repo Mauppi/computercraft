@@ -96,6 +96,60 @@ local function clear()
   term.clear()
 end
 
+local function normalizedMode(value)
+  value = string.lower(tostring(value or ""))
+  if value == "door_controller" then
+    return "controller"
+  end
+  if value == "server" or value == "kiosk" or value == "controller" or value == "door" then
+    return value
+  end
+  return nil
+end
+
+local function readModeFile(path)
+  if not fs.exists(path) then
+    return nil
+  end
+
+  local handle = fs.open(path, "r")
+  if not handle then
+    return nil
+  end
+  local line = handle.readLine()
+  handle.close()
+  return normalizedMode(line)
+end
+
+local function modeOverride()
+  local override = normalizedMode(MODE_OVERRIDE)
+  if override then
+    return override
+  end
+
+  override = normalizedMode(startupArgs[1])
+  if override then
+    return override
+  end
+
+  override = readModeFile("security_mode.txt") or readModeFile(".security_mode")
+  if override then
+    return override
+  end
+
+  if os.getComputerLabel then
+    local label = string.lower(tostring(os.getComputerLabel() or ""))
+    if string.find(label, "kiosk", 1, true) then
+      return "kiosk"
+    end
+    if string.find(label, "controller", 1, true) or string.find(label, "door", 1, true) then
+      return "controller"
+    end
+  end
+
+  return nil
+end
+
 local function normalizePath(path)
   path = string.gsub(tostring(path or ""), "\\", "/")
   while string.sub(path, 1, 1) == "/" do
@@ -270,8 +324,9 @@ local function selectInstallRoot()
 end
 
 local function readConfigMode()
-  if MODE_OVERRIDE then
-    return MODE_OVERRIDE
+  local override = modeOverride()
+  if override then
+    return override
   end
 
   if not fs.exists(configPath()) then
@@ -285,7 +340,7 @@ local function readConfigMode()
 
   local ok, loaded = pcall(fn)
   if ok and type(loaded) == "table" and loaded.mode then
-    return string.lower(tostring(loaded.mode))
+    return normalizedMode(loaded.mode) or "server"
   end
 
   return "server"
@@ -308,9 +363,99 @@ local function loadConfigTable()
   return {}
 end
 
+local function backupExistingConfigForKiosk()
+  local path = configPath()
+  if not fs.exists(path) then
+    return true, "no existing config"
+  end
+
+  local backupPaths = {}
+  local localBackupPath = path .. ".pre_kiosk.bak"
+  local installBackupPath = installPath("security_config.pre_kiosk.bak")
+  if INSTALL_ROOT ~= "" then
+    backupPaths[#backupPaths + 1] = installBackupPath
+  end
+  backupPaths[#backupPaths + 1] = localBackupPath
+  if INSTALL_ROOT == "" and installBackupPath ~= localBackupPath then
+    backupPaths[#backupPaths + 1] = installBackupPath
+  end
+
+  local lastError = nil
+  for i = 1, #backupPaths do
+    local backupPath = backupPaths[i]
+    local dir = fs.getDir(backupPath)
+    local dirReady = true
+    if dir and dir ~= "" then
+      local ok = pcall(ensureDir, dir)
+      if not ok then
+        dirReady = false
+        lastError = "could not create backup directory " .. tostring(dir)
+      end
+    end
+
+    if dirReady then
+      if fs.exists(backupPath) then
+        pcall(fs.delete, backupPath)
+      end
+      local copied, copyErr = pcall(fs.copy, path, backupPath)
+      if copied then
+        local deleted, deleteErr = pcall(fs.delete, path)
+        if deleted then
+          return true, "backed up existing config to " .. backupPath
+        end
+        return false, "backed up existing config but could not remove old config: " .. tostring(deleteErr)
+      end
+      lastError = tostring(copyErr)
+    end
+  end
+
+  return false, "could not back up existing non-kiosk config: " .. tostring(lastError or "unknown error")
+end
+
+local function writeFallbackKioskConfig()
+  local handle = fs.open(configPath(), "w")
+  if not handle then
+    return false, "could not open " .. configPath() .. " for writing"
+  end
+
+  local lines = {
+    "return {",
+    "  mode = \"kiosk\",",
+    "  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },",
+    "  configSync = { enabled = true, includeAlarm = true },",
+    "  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },",
+    "  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },",
+    "  announcements = { enabled = true, sound = true, voice = true, volume = 1, sampleRate = 48000, maxSamples = 128000, syncAssets = true, assetsRequired = false },",
+    "  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },",
+    "}",
+  }
+
+  for i = 1, #lines do
+    local ok, err = pcall(handle.writeLine, lines[i])
+    if not ok then
+      pcall(handle.close)
+      return false, "could not write fallback kiosk config: " .. tostring(err)
+    end
+  end
+  handle.close()
+  return true, "wrote fallback kiosk config", true
+end
+
 local function copyKioskConfigIfMissing(mode)
-  if mode ~= "kiosk" or fs.exists(configPath()) then
-    return
+  if mode ~= "kiosk" then
+    return true, "not kiosk mode", false
+  end
+
+  local existingConfig = loadConfigTable()
+  if fs.exists(configPath()) and normalizedMode(existingConfig.mode) == "kiosk" then
+    return true, "existing kiosk config", false
+  end
+
+  if fs.exists(configPath()) then
+    local backedUp, backupMessage = backupExistingConfigForKiosk()
+    if not backedUp then
+      return false, backupMessage, false
+    end
   end
 
   local examplePath = installPath(KIOSK_CONFIG_EXAMPLE)
@@ -318,21 +463,18 @@ local function copyKioskConfigIfMissing(mode)
     examplePath = KIOSK_CONFIG_EXAMPLE
   end
   if fs.exists(examplePath) then
-    fs.copy(examplePath, configPath())
-    return
+    local ok, err = pcall(fs.copy, examplePath, configPath())
+    if ok then
+      return true, "copied " .. KIOSK_CONFIG_EXAMPLE, true
+    end
+    local fallbackOk, fallbackMessage = writeFallbackKioskConfig()
+    if fallbackOk then
+      return true, "could not copy " .. tostring(examplePath) .. " (" .. tostring(err) .. "); " .. tostring(fallbackMessage), true
+    end
+    return false, "could not copy " .. tostring(examplePath) .. ": " .. tostring(err) .. "; " .. tostring(fallbackMessage), false
   end
 
-  local handle = fs.open(configPath(), "w")
-  handle.writeLine("return {")
-  handle.writeLine("  mode = \"kiosk\",")
-  handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },")
-  handle.writeLine("  configSync = { enabled = true, includeAlarm = true },")
-  handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },")
-  handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = true, volume = 1, sampleRate = 48000, maxSamples = 128000, syncAssets = true, assetsRequired = false },")
-  handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
-  handle.writeLine("}")
-  handle.close()
+  return writeFallbackKioskConfig()
 end
 
 local function isWavPath(path)
@@ -996,7 +1138,6 @@ local function main()
   math.randomseed((os.epoch and os.epoch("utc") or math.floor(os.clock() * 100000)) % 2147483647)
   local storage = selectInstallRoot()
   local mode = readConfigMode()
-  copyKioskConfigIfMissing(mode)
 
   clear()
   print("Security auto-update startup")
@@ -1006,6 +1147,15 @@ local function main()
 
   local ok, message, updated = fetchUpdate()
   print((ok and "Update: " or "Update failed: ") .. tostring(message))
+
+  local kioskConfigOk, kioskConfigMessage, kioskConfigUpdated = copyKioskConfigIfMissing(mode)
+  print((kioskConfigOk and "Kiosk config: " or "Kiosk config failed: ") .. tostring(kioskConfigMessage))
+  if not kioskConfigOk then
+    print("Refusing to start without kiosk config.")
+    return
+  end
+  updated = updated or kioskConfigUpdated
+  mode = readConfigMode()
 
   local serverConfigOk, serverConfigMessage, serverConfigUpdated = installServerConfigIfMissing(mode)
   print((serverConfigOk and "Server config: " or "Server config failed: ") .. tostring(serverConfigMessage))
