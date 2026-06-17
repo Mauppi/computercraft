@@ -75,25 +75,24 @@ return {
     assetsRequired = false,
     -- assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
     voiceLines = {
-      -- badge_notice = { wav = "announcements/badge_notice.wav" },
-      -- lockdown = { files = { "announcements/lockdown_1.wav", "announcements/lockdown_2.wav" } },
+      memeorpo = { files = { "announcements/vo_memeorpo.wav" } },
+      lockdown = { files = { "announcements/vo_lockdown.wav", "announcements/vo_engaged.wav" } },
+      lockdown_clear = { files = { "announcements/vo_lockdown.wav", "announcements/vo_disengaged.wav" } },
+      alarm = { files = { "announcements/vo_alarm.wav", "announcements/vo_engaged.wav" } },
+      alarm_clear = { files = { "announcements/vo_alarm.wav", "announcements/vo_disengaged.wav" } },
+      slopday = { files = { "announcements/slop day.wav" } },
+      slopday_cancelled = { files = { "announcements/slop day cancelled.wav" } },
+      slopday_slop = { files = { "announcements/slop day slop.wav" } },
     },
     jingles = {
       announcement = {
-        -- wav = "announcements/jingle.wav",
+        wav = "announcements/announcement_jingle.wav",
         tones = {
-          { freq = 523, seconds = 0.09 },
-          { freq = 659, seconds = 0.09 },
-          { freq = 784, seconds = 0.12 },
         },
       },
       alarm = {
-        -- wav = "announcements/alarm_jingle.wav",
+        wav = "announcements/jingle_alarm.wav",
         tones = {
-          { freq = 92, seconds = 0.17 },
-          { silence = 0.035 },
-          { freq = 74, seconds = 0.20 },
-          { freq = 63, seconds = 0.24 },
         },
       },
     },
