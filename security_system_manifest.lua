@@ -5,6 +5,16 @@ return {
   appName = "facility_security_system",
   baseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
   entry = "security_system.lua",
+  serverConfig = {
+    path = "security_config.lua",
+    target = "security_config.lua",
+    required = false,
+    minSize = 500,
+    contains = {
+      "return {",
+      "mode = \"server\"",
+    },
+  },
 
   assets = {
     -- Add announcement and notification WAV assets here when committing audio files.
@@ -72,6 +82,8 @@ return {
         "security_system_rednet",
         "security_system_notifications",
         "security_system_announcements",
+        "DEFAULT_CONFIG_URL",
+        "installRemoteConfigIfMissing",
         "function controllerMain()",
         "kiosk_setup",
         "kiosk_badge_login",
@@ -104,7 +116,11 @@ return {
       path = "startup_auto_update.lua",
       required = false,
       minSize = 1000,
-      contains = "security_system_manifest.lua",
+      contains = {
+        "security_system_manifest.lua",
+        "installServerConfigIfMissing",
+        "serverConfig",
+      },
     },
     {
       path = "startup_kiosk.lua",

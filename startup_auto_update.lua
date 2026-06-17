@@ -32,6 +32,13 @@ local AFTER_UPDATE = {
 local FALLBACK_MANIFEST = {
   baseUrl = DEFAULT_BASE_URL,
   entry = PROGRAM,
+  serverConfig = {
+    path = CONFIG_FILE,
+    target = CONFIG_FILE,
+    required = false,
+    minSize = 100,
+    contains = { "return", "mode = \"server\"" },
+  },
   files = {
     {
       path = DEFAULTS_MODULE_FILE,
@@ -61,7 +68,7 @@ local FALLBACK_MANIFEST = {
       path = APP_MODULE_FILE,
       required = true,
       minSize = 2000,
-      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "includeAlarm", "function main()", "return {" },
+      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "DEFAULT_CONFIG_URL", "installRemoteConfigIfMissing", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "includeAlarm", "function main()", "return {" },
     },
     {
       path = PROGRAM,
@@ -545,6 +552,84 @@ local function fetchUpdate()
   return true, manifestSource .. ", already current", false
 end
 
+local function normalizeConfigEntry(manifest)
+  local entry = manifest and (manifest.serverConfig or manifest.configFile or manifest.config)
+  if type(entry) == "string" then
+    return {
+      path = entry,
+      target = CONFIG_FILE,
+      required = false,
+      minSize = 100,
+      contains = "return",
+    }
+  end
+  if type(entry) == "table" then
+    local copy = {}
+    for key, value in pairs(entry) do
+      copy[key] = value
+    end
+    copy.path = copy.path or CONFIG_FILE
+    copy.target = copy.target or CONFIG_FILE
+    return copy
+  end
+  return {
+    path = CONFIG_FILE,
+    target = CONFIG_FILE,
+    required = false,
+    minSize = 100,
+    contains = "return",
+  }
+end
+
+local function validateConfigText(body, label)
+  local loaded, loadErr = loadReturnedTable(body, label)
+  if not loaded then
+    return false, loadErr
+  end
+  if loaded.mode and string.lower(tostring(loaded.mode)) == "kiosk" then
+    return false, "downloaded config is kiosk mode"
+  end
+  return true
+end
+
+local function installServerConfigIfMissing(mode)
+  if mode ~= "server" then
+    return true, "not server mode", false
+  end
+  if fs.exists(CONFIG_FILE) then
+    return true, "existing " .. CONFIG_FILE, false
+  end
+  if not (http and http.get) then
+    return false, "missing " .. CONFIG_FILE .. " and HTTP API is disabled", false
+  end
+
+  local manifest, manifestSource = fetchManifest()
+  local entry = normalizeConfigEntry(manifest)
+  local baseUrl = entry.baseUrl or (manifest and manifest.baseUrl) or DEFAULT_BASE_URL
+  local path = tostring(entry.path or CONFIG_FILE)
+  local target = tostring(entry.target or CONFIG_FILE)
+  local body, fetchErr = fetchUrl(entry.url or fileUrl(baseUrl, path), false)
+  if not body then
+    return false, tostring(path) .. ": " .. tostring(fetchErr or "download failed"), false
+  end
+
+  local ok, validErr = validateFile(entry, body)
+  if ok then
+    ok, validErr = validateConfigText(body, "@" .. tostring(entry.url or fileUrl(baseUrl, path)))
+  end
+  if not ok then
+    return false, tostring(path) .. ": " .. tostring(validErr), false
+  end
+
+  if target ~= CONFIG_FILE then
+    target = CONFIG_FILE
+  end
+  if not writeFile(target, body, false) then
+    return false, "could not write " .. target, false
+  end
+  return true, "installed " .. target .. " from " .. tostring(path) .. " (" .. tostring(manifestSource) .. ")", true
+end
+
 local function addWavPath(paths, seen, value)
   value = string.gsub(tostring(value or ""), "\\", "/")
   if not isWavPath(value) or seen[value] then
@@ -692,6 +777,15 @@ local function main()
 
   local ok, message, updated = fetchUpdate()
   print((ok and "Update: " or "Update failed: ") .. tostring(message))
+
+  local serverConfigOk, serverConfigMessage, serverConfigUpdated = installServerConfigIfMissing(mode)
+  print((serverConfigOk and "Server config: " or "Server config failed: ") .. tostring(serverConfigMessage))
+  if not serverConfigOk then
+    print("Refusing to start without " .. CONFIG_FILE .. ".")
+    return
+  end
+  updated = updated or serverConfigUpdated
+  mode = readConfigMode()
 
   local configOk, configMessage, configUpdated = syncConfigFromSecurityServer(mode)
   print((configOk and "Config: " or "Config sync failed: ") .. tostring(configMessage))
