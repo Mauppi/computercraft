@@ -197,10 +197,115 @@ return {
       "Remember: report hazards before hazards report you.",
       { text = "Facility notice: keep badges visible in restricted areas.", voiceLine = "badge_notice" },
     },
+    eventAnnouncements = true,
+    events = {
+      alarm = {
+        title = "Security Alarm",
+        voiceLine = "alarm",
+        cooldownSeconds = 2,
+        variations = {
+          "Security alarm engaged. Cause: {reason}.",
+          "Attention personnel. Security response required. {reason}.",
+          "{facility} alarm condition active. Await clearance.",
+        },
+      },
+      emergency = {
+        title = "Emergency Alarm",
+        voiceLine = "alarm",
+        cooldownSeconds = 2,
+        variations = {
+          "Emergency alarm engaged. Follow facility response procedures.",
+          "Emergency condition declared. Move with purpose and await instruction.",
+          "{facility} emergency response is now active.",
+        },
+      },
+      alarm_reset = {
+        title = "Alarm Reset",
+        voiceLine = "alarm_clear",
+        cooldownSeconds = 2,
+        variations = {
+          "Alarm condition cleared. Resume normal duties.",
+          "Security alarm reset. Continue monitoring your area.",
+          "{facility} alarm state has returned to clear.",
+        },
+      },
+      lockdown = {
+        title = "Lockdown Active",
+        voiceLine = "lockdown",
+        cooldownSeconds = 2,
+        variations = {
+          "Lockdown engaged. Secure your area and await authorization.",
+          "{facility} lockdown is active. Remain at your assigned station.",
+          "Access restrictions engaged. Lockdown procedures are in effect.",
+        },
+      },
+      lockdown_clear = {
+        title = "Lockdown Clear",
+        voiceLine = "lockdown_clear",
+        cooldownSeconds = 2,
+        variations = {
+          "Lockdown cleared. Normal access may resume.",
+          "{facility} lockdown has been lifted.",
+          "Access restrictions cleared. Thank you for your compliance.",
+        },
+      },
+    },
+    actions = {
+      SENSOR_FAULT = {
+        enabled = false,
+        title = "Facility Fault",
+        cooldownSeconds = 20,
+        variations = {
+          "Facility sensor fault detected at {sensor}.",
+          "Maintenance attention requested for sensor {sensor}.",
+          "Fault condition logged. Sensor source: {sensor}.",
+        },
+      },
+      REMOTE_SENSOR_FAULT = {
+        enabled = false,
+        title = "Remote Facility Fault",
+        cooldownSeconds = 20,
+        variations = {
+          "Remote sensor fault reported by controller {sender}.",
+          "Remote facility fault detected at {sensor}.",
+          "Remote fault report received. Profile: {profile}.",
+        },
+      },
+      SENSOR_CLEAR = {
+        title = "Facility Fault Clear",
+        cooldownSeconds = 20,
+        chance = 0.5,
+        variations = {
+          "Sensor {sensor} has returned to normal.",
+          "Fault clear logged for {sensor}.",
+        },
+      },
+      BADGE_ISSUE = {
+        title = "Badge Issued",
+        cooldownSeconds = 4,
+        variations = {
+          "Badge credentials issued for {user}.",
+          "Employee badge record updated for {user}.",
+        },
+      },
+      SETUP_CHANGE = {
+        title = "Facility Setup Updated",
+        cooldownSeconds = 6,
+        chance = 0.5,
+        variations = {
+          "Facility configuration updated by {actor}.",
+          "Setup change recorded: {action}.",
+        },
+      },
+    },
     voiceLines = {
       -- alert = { wav = "announcements/alert.wav" },
       -- badge_notice = { wav = "announcements/badge_notice.wav" },
-      -- lockdown = { files = { "announcements/lockdown_1.wav", "announcements/lockdown_2.wav" } },
+      memeorpo = { files = { "announcements/vo_memeorpo.wav" } },
+      lockdown = { files = { "announcements/vo_lockdown.wav", "announcements/vo_engaged.wav" } },
+      lockdown_clear = { files = { "announcements/vo_lockdown.wav", "announcements/vo_disengaged.wav" } },
+      alarm = { files = { "announcements/vo_alarm.wav", "announcements/vo_engaged.wav" } },
+      alarm_clear = { files = { "announcements/vo_alarm.wav", "announcements/vo_disengaged.wav" } },
       -- short = { pcm = { 0, 12, 24, 12, 0, -12, -24, -12 } },
     },
     jingles = {
@@ -278,6 +383,7 @@ return {
 
   alarm = {
     repeatSeconds = 1.25,
+    syncLeadSeconds = 1.5,
     deniedBeforeAlarm = 3,
     chat = true,
     sampleRate = 48000,

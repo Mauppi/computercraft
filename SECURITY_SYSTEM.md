@@ -197,6 +197,10 @@ announce <message>
 
 Announcements are pushed to kiosks as real-time notifications. Kiosks with speakers play a stitched `speaker.playAudio` buffer when available: jingle, optional WAV/PCM voice line segments, then generated PCM voice if no file-backed voice line is configured. Configure this under `announcements`; scheduled announcements can be enabled with `announcements.auto.enabled = true`.
 
+Event and action announcements are configurable under `announcements.events` and `announcements.actions`. Each entry can use `variations` for random text, `voiceLine` for a configured WAV/PCM voice line, `chance` for probabilistic lines (`0.5` or `50` both mean 50%), and `cooldownSeconds` to avoid spam. Placeholders like `{facility}`, `{reason}`, `{actor}`, `{sensor}`, `{user}`, and `{action}` are replaced from the event or audit detail.
+
+Action announcements that happen at the same moment as an alarm can delay speaker buffers, so alarm-raising fault actions such as `SENSOR_FAULT` are best left disabled unless you intentionally want a separate spoken fault notice.
+
 Voice lines can be raw PCM tables, one WAV file, or multiple WAV segments:
 
 ```lua
@@ -204,6 +208,40 @@ announcements = {
   syncAssets = true,
   assetsRequired = false,
   -- assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
+  events = {
+    lockdown = {
+      voiceLine = "lockdown",
+      cooldownSeconds = 2,
+      variations = {
+        "Lockdown active. Secure your area.",
+        "{facility} lockdown is active. Await authorization.",
+      },
+    },
+    alarm_reset = {
+      voiceLine = "alarm_clear",
+      variations = {
+        "Alarm condition cleared.",
+        "{facility} alarm state has returned to clear.",
+      },
+    },
+  },
+  actions = {
+    SENSOR_FAULT = {
+      cooldownSeconds = 20,
+      variations = {
+        "Facility sensor fault detected at {sensor}.",
+        "Maintenance attention requested for sensor {sensor}.",
+      },
+    },
+    SETUP_CHANGE = {
+      chance = 0.5,
+      cooldownSeconds = 6,
+      variations = {
+        "Facility configuration updated by {actor}.",
+        "Setup change recorded: {action}.",
+      },
+    },
+  },
   voiceLines = {
     badge_notice = { wav = "announcements/badge_notice.wav" },
     lockdown = {
@@ -228,10 +266,11 @@ Committed audio can also be listed explicitly in `security_system_manifest.lua` 
 
 Speakers use generated PCM/DSP alarm pulses through `speaker.playAudio` when available, with Minecraft sound fallback. The default DSP profiles use low dissonant tones, sub harmonics, detune, pulsing, sample crush, tremolo, and grit for a more menacing alarm sound. Configure or disable this under `alarm.dsp`.
 
-Alarm loop entries under `alarm.sounds` can also be WAV files, stitched WAV segments, or raw PCM sample tables. When a selected loop entry has `wav`, `files`, or `pcm`, it streams through `speaker.playAudio` in chunks and waits for the full clip to finish before looping or rotating to the next alarm sound. `alarm.audio.chunkSamples` controls each speaker buffer packet, default `128000`, and `alarm.audio.loopGapSeconds` controls the gap between completed loops.
+Alarm loop entries under `alarm.sounds` can also be WAV files, stitched WAV segments, or raw PCM sample tables. When a selected loop entry has `wav`, `files`, or `pcm`, it streams through `speaker.playAudio` in chunks and waits for the full clip to finish before looping or rotating to the next alarm sound. The server broadcasts `alarm.soundStartAt` before audio starts so server and kiosk speakers begin together; `alarm.syncLeadSeconds`, default `1.5`, controls how much delivery time Rednet gets. `alarm.audio.chunkSamples` controls each speaker buffer packet, default `128000`, and `alarm.audio.loopGapSeconds` controls the gap between completed loops.
 
 ```lua
 alarm = {
+  syncLeadSeconds = 1.5,
   sampleRate = 48000,
   maxSamples = 128000,
   audio = { chunkSamples = 128000, loopGapSeconds = 0.05 },

@@ -64,6 +64,7 @@ local state = {
   },
   announcements = {
     index = 0,
+    cooldowns = {},
   },
   sensorDetails = {},
   alarm = {
@@ -73,6 +74,8 @@ local state = {
     door = nil,
     profile = nil,
     since = nil,
+    sinceMillis = nil,
+    soundStartAt = nil,
     soundIndex = 1,
     audioCache = {},
     audioStreams = {},
@@ -213,6 +216,10 @@ function audit(action, detail)
     local detailText = string.gsub(compact(detail or ""), "[\r\n]+", " ")
     handle.writeLine(timestamp() .. " C" .. tostring(auditClearance(action)) .. " " .. action .. " " .. detailText)
     handle.close()
+  end
+
+  if config and type(broadcastActionAnnouncement) == "function" then
+    pcall(broadcastActionAnnouncement, action, detail)
   end
 end
 
@@ -451,6 +458,18 @@ function applyDefaults(userConfig)
   for key, value in pairs(defaultConfig.announcements.auto) do
     if merged.announcements.auto[key] == nil then
       merged.announcements.auto[key] = shallowCopy(value)
+    end
+  end
+  merged.announcements.events = merged.announcements.events or shallowCopy(defaultConfig.announcements.events or {})
+  for key, value in pairs(defaultConfig.announcements.events or {}) do
+    if merged.announcements.events[key] == nil then
+      merged.announcements.events[key] = shallowCopy(value)
+    end
+  end
+  merged.announcements.actions = merged.announcements.actions or shallowCopy(defaultConfig.announcements.actions or {})
+  for key, value in pairs(defaultConfig.announcements.actions or {}) do
+    if merged.announcements.actions[key] == nil then
+      merged.announcements.actions[key] = shallowCopy(value)
     end
   end
 
@@ -1106,6 +1125,7 @@ function alarmProfile(profileName)
     sounds = profile.sounds or alarm.sounds or {},
     dsp = profile.dsp or alarm.dsp,
     audio = profile.audio or alarm.audio,
+    syncLeadSeconds = profile.syncLeadSeconds or alarm.syncLeadSeconds or 1.5,
     sampleRate = profile.sampleRate or alarm.sampleRate,
     maxSamples = profile.maxSamples or alarm.maxSamples,
     volume = profile.volume or alarm.volume,
@@ -1161,6 +1181,8 @@ function alarmStatePayload()
       door = state.alarm.door,
       actor = state.alarm.actor,
       profile = state.alarm.profile,
+      sinceMillis = state.alarm.sinceMillis,
+      soundStartAt = state.alarm.soundStartAt,
     },
     lockdown = state.lockdown,
   }
@@ -1221,8 +1243,299 @@ function broadcastKioskNotification(notification, targetUser)
   })
 end
 
+function announcementConfig()
+  return (config and config.announcements) or {}
+end
+
+function firstTextValue(...)
+  for index = 1, select("#", ...) do
+    local value = select(index, ...)
+    if value ~= nil and tostring(value) ~= "" then
+      return tostring(value)
+    end
+  end
+  return nil
+end
+
+function chooseAnnouncementValue(value)
+  if type(value) == "table" and #value > 0 then
+    return chooseAnnouncementValue(value[math.random(1, #value)])
+  end
+  return value
+end
+
+function copyContextFields(context, source)
+  if type(source) ~= "table" then
+    return
+  end
+  for key, value in pairs(source) do
+    if type(value) ~= "table" and context[key] == nil then
+      context[key] = value
+    end
+  end
+end
+
+function announcementContextValue(context, key)
+  local current = context
+  for part in string.gmatch(tostring(key or ""), "[^%.]+") do
+    if type(current) ~= "table" then
+      return nil
+    end
+    current = current[part]
+    if current == nil then
+      return nil
+    end
+  end
+  return current
+end
+
+function formatAnnouncementTemplate(text, context)
+  text = tostring(text or "")
+  return (string.gsub(text, "{([%w_%.%-]+)}", function(key)
+    local value = announcementContextValue(context or {}, key)
+    if value == nil then
+      return ""
+    end
+    return tostring(value)
+  end))
+end
+
+function eventAnnouncementContext(kind, title, text, severity, extra)
+  local context = {
+    kind = kind,
+    event = kind,
+    title = title,
+    text = text,
+    message = text,
+    severity = severity,
+    facility = displayBranding().facilityName or config.siteName or "Facility",
+    shortName = displayBranding().shortName or "SEC",
+  }
+  copyContextFields(context, extra)
+  if type(extra) == "table" and type(extra.alarm) == "table" then
+    context.reason = context.reason or extra.alarm.reason
+    context.actor = context.actor or extra.alarm.actor
+    context.door = context.door or extra.alarm.door
+    context.profile = context.profile or extra.alarm.profile
+  end
+  return context
+end
+
+function actionAnnouncementContext(action, detail)
+  local context = {
+    kind = "action",
+    event = action,
+    action = action,
+    detail = type(detail) == "table" and compact(detail) or tostring(detail or ""),
+    facility = displayBranding().facilityName or config.siteName or "Facility",
+    shortName = displayBranding().shortName or "SEC",
+  }
+  copyContextFields(context, detail)
+  return context
+end
+
+function announcementCooldownReady(key, spec)
+  local seconds = tonumber(spec and spec.cooldownSeconds)
+  if not seconds or seconds <= 0 then
+    return true
+  end
+
+  state.announcements.cooldowns = state.announcements.cooldowns or {}
+  local now = os.clock()
+  local last = tonumber(state.announcements.cooldowns[key]) or 0
+  if now - last < seconds then
+    return false
+  end
+  return true
+end
+
+function markAnnouncementCooldown(key, spec)
+  local seconds = tonumber(spec and spec.cooldownSeconds)
+  if seconds and seconds > 0 then
+    state.announcements.cooldowns = state.announcements.cooldowns or {}
+    state.announcements.cooldowns[key] = os.clock()
+  end
+end
+
+function announcementSpecAllowed(key, spec)
+  if type(spec) ~= "table" then
+    return true
+  end
+  if spec.enabled == false then
+    return false
+  end
+  if not announcementCooldownReady(key, spec) then
+    return false
+  end
+  local chance = tonumber(spec.chance)
+  if chance then
+    if chance > 1 then
+      chance = chance / 100
+    end
+    if math.random() > math.max(0, math.min(1, chance)) then
+      return false
+    end
+  end
+  return true
+end
+
+function announcementVariation(spec)
+  if type(spec) ~= "table" then
+    return spec
+  end
+  local variants = spec.variations or spec.variants or spec.lines or spec.messages or spec.texts
+  if type(variants) == "table" and #variants > 0 then
+    return variants[math.random(1, #variants)]
+  end
+  return spec
+end
+
+function configuredAnnouncementText(spec, variant)
+  if type(variant) == "string" or type(variant) == "number" then
+    return tostring(variant)
+  end
+  if type(variant) == "table" then
+    return firstTextValue(variant.text, variant.message, variant.body, variant.title, variant[1])
+  end
+  if type(spec) == "string" or type(spec) == "number" then
+    return tostring(spec)
+  end
+  if type(spec) == "table" then
+    return firstTextValue(spec.text, spec.message, spec.body, spec.title, spec[1])
+  end
+  return nil
+end
+
+function configuredAnnouncementVoice(spec, variant)
+  local value = nil
+  if type(variant) == "table" then
+    value = variant.voiceLine or variant.voice or variant.id
+  end
+  if value == nil and type(spec) == "table" then
+    value = spec.voiceLine or spec.voice or spec.id
+  end
+  return chooseAnnouncementValue(value)
+end
+
+function configuredAnnouncement(key, fallbackKey, context)
+  local announcements = announcementConfig()
+  if announcements.enabled == false or announcements.eventAnnouncements == false then
+    return nil
+  end
+
+  local events = announcements.events or {}
+  local actions = announcements.actions or {}
+  local spec = events[key] or events[fallbackKey] or actions[key] or actions[fallbackKey]
+  if spec == nil then
+    return nil
+  end
+  if not announcementSpecAllowed(key, spec) then
+    return nil
+  end
+
+  local variant = announcementVariation(spec)
+  if type(variant) == "table" and variant.enabled == false then
+    return nil
+  end
+
+  local text = configuredAnnouncementText(spec, variant)
+  if not text or text == "" then
+    return nil
+  end
+
+  local out = {
+    text = formatAnnouncementTemplate(text, context),
+    voiceLine = configuredAnnouncementVoice(spec, variant),
+  }
+
+  if type(spec) == "table" then
+    out.kind = spec.kind
+    out.title = spec.title
+    out.severity = spec.severity
+    out.announcement = spec.announcement
+    out.wav = spec.wav
+    out.files = spec.files
+    out.pcm = spec.pcm
+  end
+  if type(variant) == "table" then
+    out.kind = variant.kind or out.kind
+    out.title = variant.title or out.title
+    out.severity = variant.severity or out.severity
+    if variant.announcement ~= nil then
+      out.announcement = variant.announcement
+    end
+    if variant.wav ~= nil then
+      out.wav = variant.wav
+    end
+    if variant.files ~= nil then
+      out.files = variant.files
+    end
+    if variant.pcm ~= nil then
+      out.pcm = variant.pcm
+    end
+  end
+  out.title = out.title and formatAnnouncementTemplate(out.title, context) or nil
+  out.severity = out.severity and formatAnnouncementTemplate(out.severity, context) or nil
+  markAnnouncementCooldown(key, spec)
+  return out
+end
+
+function applyConfiguredAnnouncement(notification, configured)
+  if not (type(notification) == "table" and type(configured) == "table") then
+    return notification
+  end
+  notification.text = configured.text or notification.text
+  notification.message = notification.text
+  notification.title = configured.title or notification.title
+  notification.severity = configured.severity or notification.severity
+  notification.voiceLine = configured.voiceLine or notification.voiceLine
+  if configured.kind then
+    notification.kind = configured.kind
+  end
+  if configured.announcement ~= nil then
+    notification.announcement = configured.announcement and true or false
+  else
+    notification.announcement = true
+  end
+  if configured.wav ~= nil then
+    notification.wav = configured.wav
+  end
+  if configured.files ~= nil then
+    notification.files = configured.files
+  end
+  if configured.pcm ~= nil then
+    notification.pcm = configured.pcm
+  end
+  return notification
+end
+
+function broadcastActionAnnouncement(action, detail)
+  if action == "ANNOUNCEMENT" then
+    return
+  end
+  local context = actionAnnouncementContext(action, detail)
+  local configured = configuredAnnouncement("action:" .. tostring(action or ""), action, context)
+  if not configured then
+    return
+  end
+  local notification = makeNotification("announcement", configured.title or "Facility Announcement", configured.text, configured.severity or "info", {
+    actor = context.actor or context.user or "system",
+    action = action,
+    detail = context.detail,
+    voiceLine = configured.voiceLine,
+  })
+  applyConfiguredAnnouncement(notification, configured)
+  broadcastKioskNotification(notification)
+end
+
 function broadcastEventNotification(kind, title, text, severity, extra)
-  broadcastKioskNotification(makeNotification(kind, title, text, severity, extra))
+  local context = eventAnnouncementContext(kind, title, text, severity, extra)
+  local notification = makeNotification(kind, title, text, severity, extra)
+  local configured = configuredAnnouncement("event:" .. tostring(kind or ""), kind, context)
+  if configured then
+    applyConfiguredAnnouncement(notification, configured)
+  end
+  broadcastKioskNotification(notification)
 end
 
 function broadcastLockdownNotification(active, actor, source)
@@ -1278,8 +1591,12 @@ function nextConfiguredAnnouncement()
   end
 
   local line = lines[state.announcements.index]
-  if type(line) == "table" then
-    return line.text or line.message or line.title, line.voiceLine or line.id
+  local variant = announcementVariation(line)
+  local context = eventAnnouncementContext("announcement", "Facility Announcement", "", "info", {})
+  local text = configuredAnnouncementText(line, variant)
+  local voiceLine = configuredAnnouncementVoice(line, variant)
+  if text then
+    return formatAnnouncementTemplate(text, context), voiceLine
   end
   return tostring(line), nil
 end
@@ -1495,6 +1812,26 @@ function alarmLoopGap(profile)
   return math.max(0, gap)
 end
 
+function alarmSyncLeadMillis(profile)
+  local seconds = tonumber(profile and profile.syncLeadSeconds) or 1.5
+  if seconds < 0 then
+    seconds = 0
+  end
+  return math.floor((seconds * 1000) + 0.5)
+end
+
+function alarmDelayUntilMillis(targetMillis)
+  targetMillis = tonumber(targetMillis)
+  if not targetMillis then
+    return 0
+  end
+  return math.max(0, (targetMillis - nowMillis()) / 1000)
+end
+
+function alarmWaitingForStart()
+  return state.alarm.active and tonumber(state.alarm.soundStartAt) and nowMillis() < tonumber(state.alarm.soundStartAt)
+end
+
 function pruneAlarmAudioStreams()
   state.alarm.audioStreams = state.alarm.audioStreams or {}
   local now = os.clock()
@@ -1683,6 +2020,10 @@ function alarmSoundValue(sound, key, fallback)
 end
 
 function playAlarmPulse()
+  if alarmWaitingForStart() then
+    return false
+  end
+
   if alarmAudioBusy() then
     return false
   end
@@ -1721,6 +2062,9 @@ end
 
 function alarmNextPulseDelay()
   local profile = alarmProfile(state.alarm.profile)
+  if alarmWaitingForStart() then
+    return math.max(0.05, alarmDelayUntilMillis(state.alarm.soundStartAt))
+  end
   if alarmAudioBusy() then
     return math.max(0.1, ((tonumber(state.alarm.audioPlayingUntil) or os.clock()) - os.clock()) + alarmLoopGap(profile))
   end
@@ -1729,7 +2073,7 @@ end
 
 function scheduleAlarmPulse()
   if state.alarm.active then
-    scheduleTimer(alarmNextPulseDelay(), { type = "alarm_pulse" })
+    scheduleTimer(alarmNextPulseDelay(), { type = "alarm_pulse", generation = state.alarm.audioGeneration })
   end
 end
 
@@ -1743,13 +2087,14 @@ function raiseAlarm(reason, doorId, actor, profileName)
       state.alarm.door = doorId
       state.alarm.actor = actor
       state.alarm.profile = "emergency"
+      state.alarm.sinceMillis = nowMillis()
+      state.alarm.soundStartAt = state.alarm.sinceMillis + alarmSyncLeadMillis(alarmProfile("emergency"))
       state.alarm.soundIndex = 1
-      setAlarmOutputs(true)
-      playAlarmPulse()
-      scheduleAlarmPulse()
       local profile = alarmProfile("emergency")
-      sendChat((profile.label or "EMERGENCY") .. ": " .. state.alarm.reason, "emergency")
       broadcastAlarmState()
+      scheduleAlarmPulse()
+      setAlarmOutputs(true)
+      sendChat((profile.label or "EMERGENCY") .. ": " .. state.alarm.reason, "emergency")
       broadcastEventNotification("emergency", profile.label or "Emergency Alarm", state.alarm.reason, "critical", {
         alarm = shallowCopy(state.alarm),
       })
@@ -1784,15 +2129,16 @@ function raiseAlarm(reason, doorId, actor, profileName)
   state.alarm.actor = actor
   state.alarm.profile = profileName
   state.alarm.since = os.clock()
+  state.alarm.sinceMillis = nowMillis()
+  state.alarm.soundStartAt = state.alarm.sinceMillis + alarmSyncLeadMillis(alarmProfile(profileName))
   state.alarm.soundIndex = 1
   clearAlarmAudioStreams(true)
 
-  setAlarmOutputs(true)
-  playAlarmPulse()
-  scheduleAlarmPulse()
   local profile = alarmProfile(profileName)
-  sendChat((profile.label or "ALARM") .. ": " .. state.alarm.reason, profileName)
   broadcastAlarmState()
+  scheduleAlarmPulse()
+  setAlarmOutputs(true)
+  sendChat((profile.label or "ALARM") .. ": " .. state.alarm.reason, profileName)
   broadcastEventNotification(profileName == "emergency" and "emergency" or "alarm", profile.label or "Alarm", state.alarm.reason, profileName == "emergency" and "critical" or "warning", {
     alarm = shallowCopy(state.alarm),
   })
@@ -1813,6 +2159,8 @@ function resetAlarm(actor)
   state.alarm.actor = nil
   state.alarm.profile = nil
   state.alarm.since = nil
+  state.alarm.sinceMillis = nil
+  state.alarm.soundStartAt = nil
   clearAlarmAudioStreams(true)
   audit("ALARM_RESET", actor or "console")
   broadcastAlarmState()
@@ -3637,6 +3985,8 @@ function statusSnapshot()
       door = state.alarm.door,
       actor = state.alarm.actor,
       profile = state.alarm.profile,
+      sinceMillis = state.alarm.sinceMillis,
+      soundStartAt = state.alarm.soundStartAt,
     },
     lockdown = state.lockdown,
     doors = doors,
@@ -5953,7 +6303,9 @@ function kioskApplyNotification(notification, sender, envelope)
 
   local item = kioskNotifications.push(state.kiosk, notification, config.notifications and config.notifications.maxItems)
   if item then
-    if item.kind == "announcement" or item.kind == "alarm" or item.kind == "emergency" or item.kind == "lockdown" then
+    if item.alarm and (item.kind == "alarm" or item.kind == "emergency") then
+      kioskApplyAlarmMessage({ alarm = item.alarm }, sender)
+    elseif item.announcement == true or item.kind == "announcement" or item.kind == "alarm" or item.kind == "emergency" or item.kind == "lockdown" then
       facilityAnnouncements.play(findSpeakers(), item, config.announcements or {})
     else
       kioskNotifications.playSound(findSpeakers(), item, config)
@@ -5978,16 +6330,24 @@ function kioskApplyAlarmMessage(message, sender)
   if alarm then
     local wasActive = state.alarm.active
     local oldProfile = state.alarm.profile
+    local oldStartAt = tonumber(state.alarm.soundStartAt)
+    local newStartAt = tonumber(alarm.soundStartAt)
     state.alarm.active = alarm.active and true or false
     state.alarm.reason = alarm.reason
     state.alarm.actor = alarm.actor
     state.alarm.door = alarm.door
     state.alarm.profile = alarm.profile
+    state.alarm.sinceMillis = alarm.sinceMillis
+    if state.alarm.active then
+      state.alarm.soundStartAt = newStartAt or nowMillis()
+    else
+      state.alarm.soundStartAt = nil
+    end
     if not state.alarm.active then
       clearAlarmAudioStreams(true)
       state.kiosk.lastAlarmSound = 0
       state.alarm.soundIndex = 1
-    elseif (not wasActive) or oldProfile ~= state.alarm.profile then
+    elseif (not wasActive) or oldProfile ~= state.alarm.profile or oldStartAt ~= tonumber(state.alarm.soundStartAt) then
       clearAlarmAudioStreams(true)
       state.kiosk.lastAlarmSound = 0
       state.alarm.soundIndex = 1
@@ -6190,9 +6550,13 @@ end
 
 function kioskAlarmSpeakerLoop()
   while state.kiosk.running do
+    local sleepSeconds = 0.1
     if state.alarm.active then
       local interval = tonumber(config.kiosk and config.kiosk.alarmSoundSeconds) or alarmProfile(state.alarm.profile).repeatSeconds or 1.5
-      if (not alarmAudioBusy()) and os.clock() - (state.kiosk.lastAlarmSound or 0) >= interval then
+      if alarmWaitingForStart() then
+        state.kiosk.lastAlarmSound = 0
+        sleepSeconds = math.max(0.01, math.min(0.05, alarmDelayUntilMillis(state.alarm.soundStartAt)))
+      elseif (not alarmAudioBusy()) and os.clock() - (state.kiosk.lastAlarmSound or 0) >= interval then
         playAlarmPulse()
         state.kiosk.lastAlarmSound = os.clock()
       end
@@ -6202,7 +6566,7 @@ function kioskAlarmSpeakerLoop()
         clearAlarmAudioStreams(true)
       end
     end
-    sleep(0.1)
+    sleep(sleepSeconds)
   end
 end
 
@@ -7393,7 +7757,7 @@ function eventLoop()
           end
           scheduleAnnouncementTimer()
         elseif payload.type == "alarm_pulse" then
-          if state.alarm.active then
+          if state.alarm.active and (payload.generation == nil or payload.generation == state.alarm.audioGeneration) then
             if not alarmAudioBusy() then
               playAlarmPulse()
             end
