@@ -276,7 +276,7 @@ return {
   },
 
   alarm = {
-    repeatSeconds = 1.5,
+    repeatSeconds = 7.1,
     deniedBeforeAlarm = 3,
     chat = true,
     sampleRate = 48000,
