@@ -13,6 +13,12 @@ return {
     -- Leave nil to discover by broadcast.
     serverId = nil,
     discoverySeconds = 3,
+    encryption = {
+      -- Must match the main server when enabled.
+      enabled = false,
+      key = "change-this-facility-key",
+      allowPlaintext = false,
+    },
   },
 
   kiosk = {
@@ -20,6 +26,12 @@ return {
     syncSeconds = 2,
     alarmSoundSeconds = 1.5,
     quitClearance = 5,
+  },
+
+  notifications = {
+    enabled = true,
+    maxItems = 12,
+    sound = true,
   },
 
   branding = {
@@ -30,5 +42,22 @@ return {
     primaryColor = "blue",
     accentColor = "lime",
     textColor = "white",
+  },
+
+  monitors = {
+    enabled = true,
+    textScale = 0.5,
+    refreshSeconds = 2,
+    rotateSeconds = 12,
+    posterSeconds = 10,
+    defaultView = "cycle",
+
+    -- Use monitor peripheral names from `peripheral.getNames()`.
+    -- `cycle` works well on kiosks because it shows server status when linked
+    -- and facility posters even before login.
+    devices = {
+      -- monitor_0 = { view = "cycle", views = { "overview", "security", "posters" }, theme = "blue" },
+      -- ["*"] = { view = "posters", textScale = 1, theme = "red" },
+    },
   },
 }

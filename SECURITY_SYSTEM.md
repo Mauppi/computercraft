@@ -2,7 +2,7 @@
 
 ## Server computer
 
-1. Put `security_system.lua` on the main security computer.
+1. Put `security_system.lua`, `security_system_app.lua`, `security_system_defaults.lua`, `security_system_rednet.lua`, and `security_system_notifications.lua` on the main security computer.
 2. Copy `security_config.example.lua` to `security_config.lua`.
 3. Edit `security_config.lua` for your doors, readers, branding, employee accounts, alarm outputs, and facility sensors.
 4. Attach/open a modem if kiosks or remote clients should connect.
@@ -24,7 +24,7 @@ Use `employee clearance <user> <level>` to grant limited kiosk administration. T
 
 ## Kiosk computers
 
-1. Put the same `security_system.lua` on each kiosk computer.
+1. Put `security_system.lua`, `security_system_app.lua`, `security_system_defaults.lua`, `security_system_rednet.lua`, and `security_system_notifications.lua` on each kiosk computer.
 2. Copy `security_kiosk_config.example.lua` to `security_config.lua`.
 3. Set `rednet.serverId` to the main server computer id, or leave it `nil` for broadcast discovery.
 4. For kiosk-only autorun, copy `startup_kiosk.lua` to `startup.lua` on the kiosk computer.
@@ -39,12 +39,34 @@ Employees can sign in, edit personal notes, read/post to the facility feed, send
 
 `startup_kiosk.lua` creates a kiosk config from `security_kiosk_config.example.lua` if `security_config.lua` does not exist, starts kiosk mode, and restarts it if it exits.
 
-`startup_auto_update.lua` fetches `security_system.lua` from `https://raw.githubusercontent.com/Mauppi/computercraft/master/security_system.lua`. Its default after-update behavior is `run` for server mode and `reboot` for kiosk mode. HTTP must be enabled in the CC:Tweaked server config.
+`security_system.lua` is now only a small launcher. It uses `require("security_system_app")` to load the main app module. The app module uses `require("security_system_defaults")`, `require("security_system_rednet")`, and `require("security_system_notifications")` for defaults, encrypted Rednet wrapping, and kiosk notification handling.
+
+`startup_auto_update.lua` fetches `security_system_manifest.lua` from `https://raw.githubusercontent.com/Mauppi/computercraft/master/security_system_manifest.lua`, then downloads every listed app file from the manifest's `baseUrl`. The required files are `security_system_defaults.lua`, `security_system_rednet.lua`, `security_system_notifications.lua`, `security_system_app.lua`, and `security_system.lua`; the manifest can also keep startup scripts, examples, and docs synced. Its default after-update behavior is `run` for server mode and `reboot` for kiosk mode. HTTP must be enabled in the CC:Tweaked server config.
 
 Locked kiosks do not expose a Quit option and disable normal Ctrl+T termination in kiosk mode. Set `kiosk.locked = false` only for development computers.
 Logged-in employees can quit kiosk mode only if the server approves the `quitKiosk` permission. `kiosk.quitClearance` is only a local display fallback; server permissions remain authoritative.
 
 Kiosks stay synced to the server alarm/lockdown state through rednet broadcasts and a periodic heartbeat. If a kiosk has a speaker attached, it mirrors active alarm sounds locally.
+
+## Rednet Encryption And Notifications
+
+The app uses `security_system_rednet.lua` to wrap Rednet messages. To enable encrypted Rednet traffic, set the same key on the server and every kiosk:
+
+```lua
+rednet = {
+  enabled = true,
+  protocol = "cc_security_v1",
+  encryption = {
+    enabled = true,
+    key = "replace-with-a-shared-facility-secret",
+    allowPlaintext = false,
+  },
+}
+```
+
+When encryption is enabled, plaintext Rednet packets are rejected unless `allowPlaintext = true`. Kiosks with the wrong key will not discover or talk to the server.
+
+Kiosks receive real-time notifications for facility feed posts, direct messages, alarms, alarm resets, and lockdown changes. Recent notifications appear in the kiosk header and in the kiosk menu's Notifications view. Attached kiosk speakers play notification sounds configured under `notifications.sounds`.
 
 ## Employee Notes And Clearance
 
@@ -64,7 +86,9 @@ Facility logs are available from the kiosk menu. The server tags new log lines w
 
 ## Alarm Audio And Emergency Buttons
 
-Speakers use generated PCM/DSP alarm pulses through `speaker.playAudio` when available, with Minecraft sound fallback. The default DSP profiles use low dissonant tones, sub harmonics, tremolo, and light grit for a more menacing alarm sound. Configure or disable this under `alarm.dsp`.
+Speakers use generated PCM/DSP alarm pulses through `speaker.playAudio` when available, with Minecraft sound fallback. The default DSP profiles use low dissonant tones, sub harmonics, detune, pulsing, sample crush, tremolo, and grit for a more menacing alarm sound. Configure or disable this under `alarm.dsp`.
+
+Lockdown changes also send kiosk notifications. Configure their speaker alerts under `notifications.sounds.lockdown` and `notifications.sounds.lockdown_clear`.
 
 Emergency button example:
 
@@ -118,6 +142,8 @@ Poster slides are configured in `monitors.posters`:
 ```
 
 Alarm banners overlay dashboards and posters unless `monitors.alarmBanner = false`.
+
+Kiosk computers also render attached monitors. The kiosk monitor loop starts with kiosk mode, refreshes from the main server using the unauthenticated `status` request when a server is known, and then draws the same views from the server snapshot. If the kiosk is not connected yet, poster views still render from local config.
 
 ## Facility sensors
 

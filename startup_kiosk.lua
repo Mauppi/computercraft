@@ -4,6 +4,10 @@
 local CONFIG_FILE = "security_config.lua"
 local KIOSK_CONFIG_EXAMPLE = "security_kiosk_config.example.lua"
 local SECURITY_PROGRAM = "security_system.lua"
+local SECURITY_APP_MODULE = "security_system_app.lua"
+local SECURITY_DEFAULTS_MODULE = "security_system_defaults.lua"
+local SECURITY_REDNET_MODULE = "security_system_rednet.lua"
+local SECURITY_NOTIFICATIONS_MODULE = "security_system_notifications.lua"
 local KIOSK_EXIT_FILE = ".security_kiosk_exit"
 local RESTART_SECONDS = 3
 
@@ -25,8 +29,9 @@ local function copyKioskConfigIfMissing()
   local handle = fs.open(CONFIG_FILE, "w")
   handle.writeLine("return {")
   handle.writeLine("  mode = \"kiosk\",")
-  handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3 },")
+  handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },")
   handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5 },")
+  handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true },")
   handle.writeLine("  branding = {")
   handle.writeLine("    facilityName = \"Facility\",")
   handle.writeLine("    shortName = \"SEC\",")
@@ -40,13 +45,32 @@ local function copyKioskConfigIfMissing()
   handle.close()
 end
 
+local function missingProgramFile()
+  if not fs.exists(SECURITY_PROGRAM) then
+    return SECURITY_PROGRAM
+  end
+  if not fs.exists(SECURITY_APP_MODULE) then
+    return SECURITY_APP_MODULE
+  end
+  if not fs.exists(SECURITY_DEFAULTS_MODULE) then
+    return SECURITY_DEFAULTS_MODULE
+  end
+  if not fs.exists(SECURITY_REDNET_MODULE) then
+    return SECURITY_REDNET_MODULE
+  end
+  if not fs.exists(SECURITY_NOTIFICATIONS_MODULE) then
+    return SECURITY_NOTIFICATIONS_MODULE
+  end
+  return nil
+end
+
 local function waitForProgram()
-  while not fs.exists(SECURITY_PROGRAM) do
+  while missingProgramFile() do
     clear()
     print("Employee Kiosk Startup")
     print()
-    print("Missing " .. SECURITY_PROGRAM)
-    print("Install it on this computer, then press enter.")
+    print("Missing " .. missingProgramFile())
+    print("Install it or run startup_auto_update.lua, then press enter.")
     read()
   end
 end

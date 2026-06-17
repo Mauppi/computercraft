@@ -31,6 +31,12 @@ return {
     -- Optional: kiosks can set serverId to this computer's id.
     serverId = nil,
     discoverySeconds = 2,
+    encryption = {
+      -- Set enabled = true and use the same key on every server/kiosk.
+      enabled = false,
+      key = "change-this-facility-key",
+      allowPlaintext = false,
+    },
   },
 
   employees = {
@@ -101,6 +107,12 @@ return {
     syncSeconds = 2,
     alarmSoundSeconds = 1.5,
     quitClearance = 5,
+  },
+
+  notifications = {
+    enabled = true,
+    maxItems = 12,
+    sound = true,
   },
 
   monitors = {
