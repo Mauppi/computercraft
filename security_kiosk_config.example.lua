@@ -89,11 +89,10 @@ return {
       intervalSeconds = 30,
     },
     lines = {
-      "Remember: report hazards before hazards report you.",
-      { text = "Facility notice: keep badges visible in restricted areas.", voiceLine = "memeorpo" },
-      { text = "Facility notice: keep badges visible in restricted areas.", voiceLine = "slopday" },
-      { text = "Facility notice: keep badges visible in restricted areas.", voiceLine = "slopday_cancelled" },
-      { text = "Facility notice: keep badges visible in restricted areas.", voiceLine = "slopday_slop" },
+      { voiceLine = "memeorpo" },
+      { voiceLine = "slopday" },
+      { voiceLine = "slopday_cancelled" },
+      { voiceLine = "slopday_slop" },
     },
     eventAnnouncements = true,
     events = {
