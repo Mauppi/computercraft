@@ -43,7 +43,7 @@ Employees can sign in, edit personal notes, read/post to the facility feed, send
 
 `startup_auto_update.lua` fetches `security_system_manifest.lua` from `https://raw.githubusercontent.com/Mauppi/computercraft/master/security_system_manifest.lua`, then downloads every listed app file from the manifest's `baseUrl`. The required files are `security_system_defaults.lua`, `security_system_rednet.lua`, `security_system_notifications.lua`, `security_system_announcements.lua`, `security_system_app.lua`, and `security_system.lua`; the manifest can also keep startup scripts, examples, docs, and WAV assets synced. Its default after-update behavior is `run` for server mode and `reboot` for kiosk mode. HTTP must be enabled in the CC:Tweaked server config.
 
-For kiosk mode, `startup_auto_update.lua` also asks the main security server for a kiosk config using Rednet op `kiosk_config`. The server returns branding, kiosk settings, Rednet settings, monitor config, notifications, and announcements. If the synced config changes, the updater treats it like an update and follows the kiosk after-update action, which defaults to reboot. After config sync, the updater scans `announcements` for every `.wav` path in voice lines and jingles, downloads those files in binary mode from the manifest `baseUrl` or `announcements.assetBaseUrl`, and validates that each downloaded clip is a WAV file.
+For kiosk mode, `startup_auto_update.lua` also asks the main security server for a kiosk config using Rednet op `kiosk_config`. The server returns branding, kiosk settings, Rednet settings, monitor config, notifications, and announcements. If the synced config changes, the updater treats it like an update and follows the kiosk after-update action, which defaults to reboot. After config sync, the updater scans `announcements` and `notifications` for every `.wav` path in voice lines, jingles, and notification sounds, downloads those files in binary mode from the manifest `baseUrl`, `announcements.assetBaseUrl`, or `notifications.assetBaseUrl`, and validates that each downloaded clip is a WAV file.
 
 Locked kiosks do not expose a Quit option and disable normal Ctrl+T termination in kiosk mode. Set `kiosk.locked = false` only for development computers.
 Logged-in employees can quit kiosk mode only if the server approves the `quitKiosk` permission. `kiosk.quitClearance` is only a local display fallback; server permissions remain authoritative.
@@ -54,7 +54,7 @@ Logged-in kiosks auto-logout after `kiosk.autoLogoutSeconds` of no input. Logged
 
 ## Setup Wizard And Door Controllers
 
-Use the server console command `setup` after an admin `login <admin-pin>` to configure facility hardware from the terminal. The setup wizard can scan server peripherals, scan a remote door controller, add or update doors, add facility sensors, add emergency buttons, and map reader sources to doors. Each change is saved to `security_config.lua` immediately.
+Use the server console command `setup` after an admin `login <admin-pin>` to configure facility hardware from the terminal. The setup wizard can scan server peripherals, scan a remote door controller, add or update doors, remove doors, add/remove facility sensors, add/remove emergency buttons, add/remove generators, and map/remove reader sources. Each change is saved to `security_config.lua` immediately.
 
 Kiosks also expose `Facility setup` for employees whose clearance meets `employees.permissions.setupFacility`, default C5. The kiosk sends setup requests to the server with the logged-in session token, and the server enforces the clearance before changing config.
 
@@ -146,6 +146,24 @@ rednet = {
 When encryption is enabled, plaintext Rednet packets are rejected unless `allowPlaintext = true`. Kiosks with the wrong key will not discover or talk to the server.
 
 Kiosks receive real-time notifications for facility feed posts, direct messages, alarms, alarm resets, and lockdown changes. Recent notifications appear in the kiosk header and in the kiosk menu's Notifications view. Attached kiosk speakers play notification sounds configured under `notifications.sounds`.
+
+DMs and facility feed posts can use short WAV clips through `speaker.playAudio`. By default, only notification kinds `dm` and `social` may play notification WAVs; alarm, emergency, lockdown, announcement, and alarm reset events are blocked from this path so they keep using the alarm/announcement audio systems or Minecraft sound fallback.
+
+```lua
+notifications = {
+  wavKinds = { dm = true, social = true },
+  sounds = {
+    dm = {
+      { wav = "notifications/dm.wav", volume = 0.9 },
+      { name = "minecraft:block.note_block.bell", volume = 1.3, pitch = 1.6 },
+    },
+    social = {
+      { wav = "notifications/social.wav", volume = 0.8 },
+      { name = "minecraft:block.note_block.chime", volume = 1.0, pitch = 1.2 },
+    },
+  },
+}
+```
 
 ## Employee Notes And Clearance
 

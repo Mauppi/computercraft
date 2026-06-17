@@ -3377,6 +3377,136 @@ function applySetupReader(message, actor)
   return true, "reader mapped", { source = source, door = doorId }
 end
 
+function removeReaderDoorValue(mapped, doorId)
+  if type(mapped) == "table" then
+    local out = {}
+    local changed = false
+    for _, item in ipairs(mapped) do
+      if tostring(item) == tostring(doorId) then
+        changed = true
+      else
+        table.insert(out, item)
+      end
+    end
+    if #out == 0 then
+      return nil, changed
+    end
+    return out, changed
+  end
+
+  if tostring(mapped) == tostring(doorId) then
+    return nil, true
+  end
+  return mapped, false
+end
+
+function removeReaderMappingsForDoor(doorId)
+  local removed = {}
+  config.readers = config.readers or {}
+  for source, mapped in pairs(config.readers) do
+    local nextValue, changed = removeReaderDoorValue(mapped, doorId)
+    if changed then
+      removed[#removed + 1] = source
+      config.readers[source] = nextValue
+    end
+  end
+  return removed
+end
+
+function setupListItemMatches(item, selector)
+  selector = tostring(selector or "")
+  if selector == "" or type(item) ~= "table" then
+    return false
+  end
+
+  local cleanSelector = cleanConfigId(selector, selector)
+  local keys = { "id", "name", "label", "peripheral", "source", "localSource" }
+  for _, key in ipairs(keys) do
+    local value = item[key]
+    if value ~= nil and (tostring(value) == selector or cleanConfigId(value, value) == cleanSelector) then
+      return true
+    end
+  end
+  return false
+end
+
+function removeSetupListItem(list, selector)
+  if type(list) ~= "table" then
+    return nil, nil
+  end
+
+  local index = tonumber(selector)
+  if index and list[index] then
+    return table.remove(list, index), index
+  end
+
+  for itemIndex, item in ipairs(list) do
+    if setupListItemMatches(item, selector) then
+      return table.remove(list, itemIndex), itemIndex
+    end
+  end
+  return nil, nil
+end
+
+function applyRemoveSetupDoor(message, actor)
+  local doorId = tostring(message.door or message.doorId or message.id or "")
+  if doorId == "" or not (config.doors and config.doors[doorId]) then
+    return false, "unknown door"
+  end
+
+  pcall(lockDoor, doorId, "setup_remove", true)
+  config.doors[doorId] = nil
+  state.doors[doorId] = nil
+  local removedReaders = {}
+  if message.keepReaders ~= true then
+    removedReaders = removeReaderMappingsForDoor(doorId)
+  end
+  saveSetupChange(actor, "remove_door", { door = doorId, removedReaders = removedReaders })
+  return true, "door removed", { door = doorId, removedReaders = removedReaders }
+end
+
+function applyRemoveSetupSensor(message, actor)
+  config.sensors = config.sensors or {}
+  local removed, index = removeSetupListItem(config.sensors, message.selector or message.sensor or message.id or message.index or message.name)
+  if not removed then
+    return false, "sensor not found"
+  end
+  saveSetupChange(actor, "remove_sensor", { index = index, sensor = removed.name or removed.id or removed.peripheral })
+  return true, "sensor removed", { sensor = removed, index = index }
+end
+
+function applyRemoveSetupEmergency(message, actor)
+  config.emergencyButtons = config.emergencyButtons or {}
+  local removed, index = removeSetupListItem(config.emergencyButtons, message.selector or message.button or message.id or message.index or message.name)
+  if not removed then
+    return false, "emergency button not found"
+  end
+  saveSetupChange(actor, "remove_emergency_button", { index = index, button = removed.name or removed.id })
+  return true, "emergency button removed", { button = removed, index = index }
+end
+
+function applyRemoveSetupGenerator(message, actor)
+  config.generators = config.generators or {}
+  local removed, index = removeSetupListItem(config.generators, message.selector or message.generator or message.id or message.index or message.name)
+  if not removed then
+    return false, "generator not found"
+  end
+  saveSetupChange(actor, "remove_generator", { index = index, generator = removed.name or removed.id or removed.peripheral })
+  return true, "generator removed", { generator = removed, index = index }
+end
+
+function applyRemoveSetupReader(message, actor)
+  local source = tostring(message.source or message.reader or message.selector or "")
+  if source == "" or not (config.readers and config.readers[source] ~= nil) then
+    return false, "reader mapping not found"
+  end
+
+  local old = config.readers[source]
+  config.readers[source] = nil
+  saveSetupChange(actor, "remove_reader", { source = source, previous = old })
+  return true, "reader mapping removed", { source = source }
+end
+
 function applySetupIssueBadge(message, actor)
   local ok, result = issueEmployeeBadge(message.username or message.user, message.data or message.badge or message.credential, actor, message.doorAccess)
   if not ok then
@@ -3402,6 +3532,16 @@ function handleSetupAction(message, actor)
     return applySetupReader(message, actor)
   elseif action == "issue_badge" or action == "badge" then
     return applySetupIssueBadge(message, actor)
+  elseif action == "remove_door" then
+    return applyRemoveSetupDoor(message, actor)
+  elseif action == "remove_sensor" then
+    return applyRemoveSetupSensor(message, actor)
+  elseif action == "remove_emergency" or action == "remove_emergency_button" then
+    return applyRemoveSetupEmergency(message, actor)
+  elseif action == "remove_generator" then
+    return applyRemoveSetupGenerator(message, actor)
+  elseif action == "remove_reader" then
+    return applyRemoveSetupReader(message, actor)
   end
   return false, "unknown setup action"
 end
@@ -4913,6 +5053,70 @@ function setupConsoleIssueBadge()
   print(ok and ("Issued " .. tostring(extra and extra.data or data) .. " using " .. tostring(writerResult) .. " via " .. tostring(method)) or ("Setup failed: " .. tostring(message)))
 end
 
+function printSetupRemovalSummary()
+  local summary = setupSummary()
+  print("Doors")
+  for _, door in ipairs(summary.doors or {}) do
+    print("  " .. tostring(door.id) .. " - " .. tostring(door.label) .. " [" .. tostring(door.controller) .. "]")
+  end
+  print("Sensors")
+  for index, sensor in ipairs(summary.sensors or {}) do
+    print("  " .. tostring(index) .. ". " .. tostring(sensor.name or sensor.id or sensor.peripheral or "sensor"))
+  end
+  print("Emergency buttons")
+  for index, button in ipairs(summary.emergencyButtons or {}) do
+    print("  " .. tostring(index) .. ". " .. tostring(button.name or button.id or "button"))
+  end
+  print("Generators")
+  for index, generator in ipairs(summary.generators or {}) do
+    print("  " .. tostring(index) .. ". " .. tostring(generator.name or generator.id or generator.peripheral or "generator"))
+  end
+  print("Readers")
+  for source, door in pairs(summary.readers or {}) do
+    print("  " .. tostring(source) .. " -> " .. tostring(door))
+  end
+end
+
+function setupConsoleRemoveItem()
+  while true do
+    print()
+    printSetupRemovalSummary()
+    print()
+    print("Remove")
+    print("1. Door")
+    print("2. Sensor")
+    print("3. Emergency button")
+    print("4. Generator")
+    print("5. Reader mapping")
+    print("B. Back")
+    local choice = string.lower(tostring(promptLine("> ", "") or ""))
+    local payload
+
+    if choice == "1" then
+      payload = {
+        action = "remove_door",
+        door = promptLine("Door id", ""),
+        keepReaders = not promptBool("Also remove reader mappings for this door", true),
+      }
+    elseif choice == "2" then
+      payload = { action = "remove_sensor", selector = promptLine("Sensor number/id/name", "") }
+    elseif choice == "3" then
+      payload = { action = "remove_emergency", selector = promptLine("Button number/id/name", "") }
+    elseif choice == "4" then
+      payload = { action = "remove_generator", selector = promptLine("Generator number/id/name", "") }
+    elseif choice == "5" then
+      payload = { action = "remove_reader", source = promptLine("Reader source", "") }
+    elseif choice == "b" then
+      return
+    end
+
+    if payload then
+      local ok, message = handleSetupAction(payload, "console")
+      print(ok and tostring(message) or ("Remove failed: " .. tostring(message)))
+    end
+  end
+end
+
 function setupWizard()
   while true do
     print()
@@ -4925,6 +5129,7 @@ function setupWizard()
     print("6. Add emergency button")
     print("7. Map reader to door")
     print("8. Issue/write employee badge")
+    print("9. Remove configured item")
     print("B. Back")
     local choice = string.lower(tostring(promptLine("> ", "") or ""))
 
@@ -4958,6 +5163,8 @@ function setupWizard()
       setupConsoleMapReader()
     elseif choice == "8" then
       setupConsoleIssueBadge()
+    elseif choice == "9" then
+      setupConsoleRemoveItem()
     elseif choice == "b" then
       return
     end
@@ -6202,6 +6409,72 @@ function kioskSetupIssueBadge(serverId, token)
   pause()
 end
 
+function kioskPrintSetupRemovalSummary(summary)
+  kioskPrintSetupSummary(summary)
+  print("Readers")
+  for source, door in pairs(summary.readers or {}) do
+    print("  " .. tostring(source) .. " -> " .. tostring(door))
+  end
+  print("Sensors")
+  for index, sensor in ipairs(summary.sensors or {}) do
+    print("  " .. tostring(index) .. ". " .. tostring(sensor.name or sensor.id or sensor.peripheral or "sensor"))
+  end
+  print("Emergency buttons")
+  for index, button in ipairs(summary.emergencyButtons or {}) do
+    print("  " .. tostring(index) .. ". " .. tostring(button.name or button.id or "button"))
+  end
+  print("Generators")
+  for index, generator in ipairs(summary.generators or {}) do
+    print("  " .. tostring(index) .. ". " .. tostring(generator.name or generator.id or generator.peripheral or "generator"))
+  end
+end
+
+function kioskSetupRemoveItem(serverId, token, brand, user)
+  while true do
+    drawKioskHeader(brand, user)
+    local summaryReply = kioskSetupRequest(serverId, token, { action = "summary" })
+    if summaryReply.ok then
+      kioskPrintSetupRemovalSummary(summaryReply.summary or {})
+    else
+      print("Summary unavailable: " .. tostring(summaryReply.error))
+    end
+    print()
+    print("Remove")
+    print("1. Door")
+    print("2. Sensor")
+    print("3. Emergency button")
+    print("4. Generator")
+    print("5. Reader mapping")
+    print("B. Back")
+
+    local choice = string.lower(kioskRead("> "))
+    local payload
+    if choice == "1" then
+      payload = {
+        action = "remove_door",
+        door = kioskPromptLine("Door id", ""),
+        keepReaders = not kioskPromptBool("Also remove reader mappings for this door", true),
+      }
+    elseif choice == "2" then
+      payload = { action = "remove_sensor", selector = kioskPromptLine("Sensor number/id/name", "") }
+    elseif choice == "3" then
+      payload = { action = "remove_emergency", selector = kioskPromptLine("Button number/id/name", "") }
+    elseif choice == "4" then
+      payload = { action = "remove_generator", selector = kioskPromptLine("Generator number/id/name", "") }
+    elseif choice == "5" then
+      payload = { action = "remove_reader", source = kioskPromptLine("Reader source", "") }
+    elseif choice == "b" then
+      return
+    end
+
+    if payload then
+      local reply = kioskSetupRequest(serverId, token, payload)
+      print(reply.ok and tostring(reply.message or "Removed.") or ("Remove failed: " .. tostring(reply.error)))
+      pause()
+    end
+  end
+end
+
 function kioskSetupMenu(serverId, brand, token, user)
   while true do
     drawKioskHeader(brand, user)
@@ -6219,6 +6492,7 @@ function kioskSetupMenu(serverId, brand, token, user)
       print("8. Issue/write employee badge")
     end
     print("9. This kiosk door-controller mode")
+    print("0. Remove configured item")
     print("B. Back")
 
     local choice = string.lower(kioskRead("> "))
@@ -6260,6 +6534,8 @@ function kioskSetupMenu(serverId, brand, token, user)
       kioskSetupIssueBadge(serverId, token)
     elseif choice == "9" then
       kioskLocalControllerSetup()
+    elseif choice == "0" then
+      kioskSetupRemoveItem(serverId, token, brand, user)
     elseif choice == "b" then
       return true
     end

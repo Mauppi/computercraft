@@ -7,11 +7,13 @@ return {
   entry = "security_system.lua",
 
   assets = {
-    -- Add announcement WAV assets here when committing audio files.
+    -- Add announcement and notification WAV assets here when committing audio files.
     -- Entries are optional by default unless required = true.
     -- { path = "announcements/jingle.wav", binary = true, kind = "wav" },
     -- { path = "announcements/alarm_jingle.wav", binary = true, kind = "wav" },
     -- { path = "announcements/badge_notice.wav", binary = true, kind = "wav" },
+    -- { path = "notifications/dm.wav", binary = true, kind = "wav" },
+    -- { path = "notifications/social.wav", binary = true, kind = "wav" },
   },
 
   files = {
@@ -41,8 +43,10 @@ return {
       minSize = 1000,
       contains = {
         "Kiosk notification",
+        "security_system_announcements",
         "function M.push",
         "function M.playSound",
+        "function M.wavKindAllowed",
       },
     },
     {
@@ -73,6 +77,7 @@ return {
         "controller_credential",
         "kioskLocalControllerLoop",
         "kiosk.controller",
+        "remove_door",
         "function main()",
         "return {",
       },

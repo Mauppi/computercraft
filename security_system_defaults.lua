@@ -138,14 +138,22 @@ return {
     enabled = true,
     maxItems = 12,
     sound = true,
+    sampleRate = 48000,
+    maxSamples = 128000,
+    wavKinds = {
+      dm = true,
+      social = true,
+    },
     sounds = {
       default = {
         { name = "minecraft:block.note_block.pling", volume = 1.2, pitch = 1.35 },
       },
       social = {
+        -- { wav = "notifications/social.wav", volume = 0.8 },
         { name = "minecraft:block.note_block.chime", volume = 1.0, pitch = 1.2 },
       },
       dm = {
+        -- { wav = "notifications/dm.wav", volume = 0.9 },
         { name = "minecraft:block.note_block.bell", volume = 1.3, pitch = 1.6 },
         { name = "minecraft:block.note_block.pling", volume = 0.9, pitch = 1.9 },
       },

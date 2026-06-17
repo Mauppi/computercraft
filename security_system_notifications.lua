@@ -2,6 +2,27 @@
 
 local M = {}
 
+local okAnnouncementAudio, announcementAudio = pcall(require, "security_system_announcements")
+if not okAnnouncementAudio then
+  announcementAudio = nil
+end
+
+local defaultWavKinds = {
+  dm = true,
+  social = true,
+  message = true,
+  feed = true,
+}
+
+local blockedWavKinds = {
+  alarm = true,
+  alarm_reset = true,
+  announcement = true,
+  emergency = true,
+  lockdown = true,
+  lockdown_clear = true,
+}
+
 local function copyNotification(notification)
   local out = {}
   for key, value in pairs(notification or {}) do
@@ -80,7 +101,160 @@ local function soundConfig(config, kind)
   }
 end
 
+local function isWavPath(path)
+  return string.sub(string.lower(tostring(path or "")), -4) == ".wav"
+end
+
+local function soundList(sounds)
+  if type(sounds) == "string" then
+    return { sounds }
+  end
+  if type(sounds) ~= "table" then
+    return {}
+  end
+  if #sounds > 0 then
+    return sounds
+  end
+  return { sounds }
+end
+
+local function wavKindAllowed(notifications, kind)
+  kind = tostring(kind or "default")
+  if blockedWavKinds[kind] then
+    return false
+  end
+
+  local allowed = notifications and notifications.wavKinds
+  if type(allowed) == "table" then
+    if allowed[kind] ~= nil then
+      return allowed[kind] == true
+    end
+    for _, value in ipairs(allowed) do
+      if tostring(value) == kind then
+        return true
+      end
+    end
+    return false
+  end
+
+  return defaultWavKinds[kind] == true
+end
+
+local function appendSamples(buffer, samples)
+  if type(samples) ~= "table" then
+    return
+  end
+  for index = 1, #samples do
+    buffer[#buffer + 1] = samples[index]
+  end
+end
+
+local function loadWav(path, audioConfig)
+  if not (announcementAudio and announcementAudio.loadWav) then
+    return nil
+  end
+  local ok, samples = pcall(announcementAudio.loadWav, path, audioConfig)
+  if ok and type(samples) == "table" and #samples > 0 then
+    return samples
+  end
+  return nil
+end
+
+local function wavPath(sound)
+  if type(sound) == "string" then
+    return isWavPath(sound) and sound or nil
+  end
+  if type(sound) ~= "table" then
+    return nil
+  end
+  return sound.wav or sound.file or sound.path
+end
+
+local function notificationPcm(sound, audioConfig)
+  if type(sound) ~= "table" then
+    local path = wavPath(sound)
+    return path and loadWav(path, audioConfig) or nil
+  end
+
+  if type(sound.pcm) == "table" then
+    return sound.pcm
+  end
+
+  local buffer = {}
+  if type(sound.files) == "table" then
+    for _, path in ipairs(sound.files) do
+      appendSamples(buffer, loadWav(path, audioConfig))
+    end
+  else
+    appendSamples(buffer, loadWav(wavPath(sound), audioConfig))
+  end
+
+  if #buffer > 0 then
+    return buffer
+  end
+  return nil
+end
+
+local function playPcm(speaker, pcm, volume, audioConfig)
+  if not (speaker and speaker.playAudio and type(pcm) == "table" and #pcm > 0) then
+    return false
+  end
+
+  local maxSamples = tonumber(audioConfig and audioConfig.maxSamples) or 128000
+  if maxSamples <= 0 or #pcm <= maxSamples then
+    local ok, accepted = pcall(speaker.playAudio, pcm, volume)
+    return ok and accepted ~= false
+  end
+
+  local chunk = {}
+  for index = 1, maxSamples do
+    chunk[index] = pcm[index]
+  end
+  local ok, accepted = pcall(speaker.playAudio, chunk, volume)
+  return ok and accepted ~= false
+end
+
+local function playNotificationWav(speaker, sounds, notifications)
+  if not (speaker and speaker.playAudio) then
+    return false
+  end
+
+  local audioConfig = (notifications and notifications.audio) or notifications or {}
+  for _, sound in ipairs(soundList(sounds)) do
+    local pcm = notificationPcm(sound, audioConfig)
+    if pcm then
+      local volume = type(sound) == "table" and sound.volume or nil
+      if playPcm(speaker, pcm, tonumber(volume) or tonumber(notifications and notifications.wavVolume) or tonumber(notifications and notifications.volume) or 1, audioConfig) then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+local function playMinecraftSound(speaker, sound)
+  if type(sound) == "string" then
+    if isWavPath(sound) then
+      return
+    end
+    if speaker.playSound then
+      pcall(speaker.playSound, sound, 1, 1)
+    end
+    return
+  end
+
+  if type(sound) ~= "table" then
+    return
+  end
+  if speaker.playSound then
+    pcall(speaker.playSound, sound.name or "minecraft:block.note_block.pling", sound.volume or 1, sound.pitch or 1)
+  elseif speaker.playNote then
+    pcall(speaker.playNote, sound.note or "pling", sound.volume or 1, sound.pitch or 1)
+  end
+end
+
 function M.playSound(speakers, notification, config)
+  notification = notification or {}
   local notifications = config and config.notifications or {}
   if notifications.enabled == false or notifications.sound == false then
     return
@@ -88,22 +262,31 @@ function M.playSound(speakers, notification, config)
 
   local kind = tostring(notification.kind or notification.type or "default")
   local sounds = soundConfig(config, kind)
-  if type(sounds) ~= "table" then
+  if type(sounds) ~= "table" and type(sounds) ~= "string" then
     return
   end
 
   for _, speaker in ipairs(speakers or {}) do
-    for _, sound in ipairs(sounds) do
-      if speaker.playSound then
-        pcall(speaker.playSound, sound.name or "minecraft:block.note_block.pling", sound.volume or 1, sound.pitch or 1)
-      elseif speaker.playNote then
-        pcall(speaker.playNote, sound.note or "pling", sound.volume or 1, sound.pitch or 1)
+    local playedWav = wavKindAllowed(notifications, kind) and playNotificationWav(speaker, sounds, notifications)
+    if not playedWav then
+      for _, sound in ipairs(soundList(sounds)) do
+        playMinecraftSound(speaker, sound)
+        if sleep and type(sound) == "table" and sound.delay then
+          sleep(sound.delay)
+        end
       end
-      if sleep and sound.delay then
-        sleep(sound.delay)
+    else
+      for _, sound in ipairs(soundList(sounds)) do
+        if sleep and type(sound) == "table" and sound.delay then
+          sleep(sound.delay)
+        end
       end
     end
   end
+end
+
+function M.wavKindAllowed(config, kind)
+  return wavKindAllowed((config and config.notifications) or config or {}, kind)
 end
 
 return M

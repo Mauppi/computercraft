@@ -16,9 +16,12 @@ return {
     textColor = "white",
   },
   logFile = "security_audit.log",
+  lockDoorsOnExit = true,
+  clearAlarmOnExit = false,
 
   -- Keep the first admin PIN private. Change this before real use.
   adminPins = { "2468" },
+  adminSessionSeconds = 300,
 
   defaultOpenSeconds = 4,
   forcedGraceSeconds = 2,
@@ -74,6 +77,8 @@ return {
       resetAlarm = 3,
       operateDoors = 3,
       lockdown = 4,
+      issueBadges = 5,
+      setupFacility = 5,
       manageEmployees = 5,
       quitKiosk = 5,
     },
@@ -97,10 +102,16 @@ return {
       DOOR_LOCK = 2,
       EMPLOYEE_LOGIN = 3,
       EMPLOYEE_LOGIN_DENIED = 3,
+      EMPLOYEE_BADGE_LOGIN = 3,
+      EMPLOYEE_BADGE_LOGIN_DENIED = 3,
       EMPLOYEE_ADD = 5,
       EMPLOYEE_ROLE = 5,
       EMPLOYEE_CLEARANCE = 5,
+      BADGE_ISSUE = 5,
+      BADGE_WRITE = 5,
       KIOSK_QUIT = 5,
+      SETUP_CHANGE = 5,
+      SETUP_DENIED = 5,
       LOCKDOWN = 3,
       LOCKDOWN_CLEAR = 3,
       SENSOR_FAULT = 2,
@@ -117,12 +128,50 @@ return {
     quitClearance = 5,
     autoLogoutSeconds = 600,
     autoRebootLoggedOutSeconds = 1800,
+    controller = {
+      enabled = false,
+      permanent = false,
+      credentialForwarding = true,
+      helloSeconds = 30,
+      pollSeconds = 0.25,
+    },
   },
 
   notifications = {
     enabled = true,
     maxItems = 12,
     sound = true,
+    sampleRate = 48000,
+    maxSamples = 128000,
+    syncAssets = true,
+    assetsRequired = true,
+    assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
+    wavKinds = {
+      dm = true,
+      social = true,
+    },
+    sounds = {
+      default = {
+      },
+      social = {
+        { wav = "announcements/jingle_notification.wav", volume = 0.8 },
+      },
+      dm = {
+        { wav = "announcements/jingle_notification.wav", volume = 0.9 },
+      },
+      alarm = {
+      },
+      emergency = {
+      },
+      lockdown = {
+      },
+      lockdown_clear = {
+        { name = "minecraft:block.note_block.chime", volume = 1.2, pitch = 1.4 },
+      },
+      announcement = {
+        { name = "minecraft:block.note_block.chime", volume = 1.4, pitch = 0.9 },
+      },
+    },
   },
 
   announcements = {
@@ -132,6 +181,12 @@ return {
     volume = 1,
     sampleRate = 48000,
     maxSamples = 128000,
+    syncAssets = true,
+    assetsRequired = false,
+    -- assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
+    characterSeconds = 0.055,
+    spaceSeconds = 0.075,
+    maxCharacters = 96,
     auto = {
       enabled = true,
       intervalSeconds = 900,
@@ -141,27 +196,26 @@ return {
       { text = "Facility notice: keep badges visible in restricted areas.", voiceLine = "badge_notice" },
     },
     voiceLines = {
+      -- alert = { wav = "announcements/alert.wav" },
       -- badge_notice = { wav = "announcements/badge_notice.wav" },
       -- lockdown = { files = { "announcements/lockdown_1.wav", "announcements/lockdown_2.wav" } },
+      -- short = { pcm = { 0, 12, 24, 12, 0, -12, -24, -12 } },
     },
     jingles = {
       announcement = {
-        -- wav = "announcements/jingle.wav",
+        wav = "announcements/announcement_jingle.wav",
         tones = {
-          { freq = 523, seconds = 0.09 },
-          { freq = 659, seconds = 0.09 },
-          { freq = 784, seconds = 0.12 },
         },
       },
       alarm = {
-        -- wav = "announcements/alarm_jingle.wav",
+        wav = "announcements/jingle_alarm.wav",
         tones = {
-          { freq = 92, seconds = 0.17 },
-          { silence = 0.035 },
-          { freq = 74, seconds = 0.20 },
-          { freq = 63, seconds = 0.24 },
         },
       },
+    },
+    fallbackSounds = {
+    },
+    alarmFallbackSounds = {
     },
   },
 
@@ -294,6 +348,17 @@ return {
     -- remoteSensorKey = "change-me",
   },
 
+  setup = {
+    enabled = true,
+    kiosk = true,
+    clearance = 5,
+    remoteEndpointTimeout = 0.75,
+    defaultDoorController = nil,
+    defaultDoorSide = "front",
+    defaultContactSide = "back",
+    defaultExitSide = "right",
+  },
+
   -- Reader source to door mapping. Examples:
   --   left = "front_door"              -- disk drive on the left side
   --   playerDetector_0 = "front_door"  -- Advanced Peripherals player detector
@@ -322,6 +387,7 @@ return {
   doors = {
     front_door = {
       label = "Front Door",
+      controller = "server",
 
       -- Iron doors normally open when redstone is on.
       output = { side = "front" },
@@ -356,6 +422,7 @@ return {
 
     vault = {
       label = "Vault",
+      controller = "server",
       output = { peripheral = "redstoneIntegrator_0", side = "left" },
       activeOpen = true,
       openSeconds = 3,
