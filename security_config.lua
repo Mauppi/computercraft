@@ -288,8 +288,8 @@ return {
     -- Speakers are discovered automatically. WAV/PCM entries loop through
     -- speaker.playAudio before generated DSP fallback is used.
     sounds = {
-      { wav = "announcements/red_alert.wav", volume = 1.2 },
-      -- { files = { "announcements/red_alert.wav", "announcements/jingle_alarm.wav" }, volume = 1.2 },
+      -- { wav = "announcements/red_alert.wav", volume = 1.2 },
+      { files = { "announcements/red_alert_a.wav", "announcements/red_alert_b.wav" }, volume = 1.2 },
       -- { pcm = { 0, 28, 56, 28, 0, -28, -56, -28 }, volume = 1.0 },
       -- { name = "minecraft:block.note_block.pling", volume = 3, pitch = 0.6 },
       -- { name = "minecraft:block.note_block.bell", volume = 3, pitch = 1.8 },
