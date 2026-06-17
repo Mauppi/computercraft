@@ -3,7 +3,6 @@
 -- a starter config on first run.
 
 return {
-  mode = "server",
   siteName = "Silo HQ",
   facilityName = "F-Aperture",
   branding = {
