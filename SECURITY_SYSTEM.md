@@ -58,6 +58,8 @@ Use the server console command `setup` after an admin `login <admin-pin>` to con
 
 Kiosks also expose `Facility setup` for employees whose clearance meets `employees.permissions.setupFacility`, default C5. The kiosk sends setup requests to the server with the logged-in session token, and the server enforces the clearance before changing config.
 
+An authorized kiosk can also make itself a permanent door controller from `Facility setup` -> `This kiosk door-controller mode`. This keeps the employee kiosk UI running, saves `kiosk.controller.enabled = true` in the kiosk's local `security_config.lua`, answers server endpoint read/write/scan requests, and forwards local RFID/NFC/card scans as controller reader sources. The auto-updater preserves this local `kiosk.controller` block when it syncs kiosk config from the server.
+
 For distributed doors, put a computer near one door or a small group of doors, attach its redstone integrators/sensors, give it the same Rednet protocol/encryption settings as the server, and run:
 
 ```lua
@@ -97,6 +99,8 @@ doors = {
 ```
 
 Use one controller computer per door when wiring is dense, or one controller for a few nearby doors when the redstone/peripheral layout is shared. The setup wizard stores the controller id on the door, so its output/contact/exit endpoints inherit that controller automatically.
+
+When using a kiosk as its own door controller, use that kiosk's computer id as the door `controller`. Scanner sources from that kiosk use `controller:<kioskId>:<peripheral>`, for example `controller:31:rfid_scanner_0`. The kiosk setup flow defaults new door/sensor/button prompts to its own controller id after local controller mode is enabled.
 
 ## Badge Writers And Door Scanners
 

@@ -373,6 +373,12 @@ function applyDefaults(userConfig)
       merged.kiosk[key] = shallowCopy(value)
     end
   end
+  merged.kiosk.controller = merged.kiosk.controller or shallowCopy(defaultConfig.kiosk.controller)
+  for key, value in pairs(defaultConfig.kiosk.controller) do
+    if merged.kiosk.controller[key] == nil then
+      merged.kiosk.controller[key] = shallowCopy(value)
+    end
+  end
 
   merged.branding = merged.branding or shallowCopy(defaultConfig.branding)
   for key, value in pairs(defaultConfig.branding) do
@@ -2470,8 +2476,40 @@ function peripheralSummary()
   return out
 end
 
+function kioskControllerOptions()
+  local kiosk = config and config.kiosk or {}
+  if type(kiosk.controller) == "table" then
+    return kiosk.controller
+  end
+  if kiosk.controller == true or kiosk.controllerMode == true then
+    return {
+      enabled = true,
+      permanent = true,
+      credentialForwarding = true,
+    }
+  end
+  return {}
+end
+
+function kioskControllerEnabled()
+  local options = kioskControllerOptions()
+  return options.enabled == true
+end
+
+function kioskControllerCredentialForwarding()
+  local options = kioskControllerOptions()
+  return kioskControllerEnabled() and options.credentialForwarding ~= false
+end
+
+function kioskControllerId()
+  return tostring(localComputerId() or "")
+end
+
 function controllerSenderAllowed(sender)
   local serverId = config and config.rednet and config.rednet.serverId
+  if not serverId and state and state.kiosk then
+    serverId = state.kiosk.serverId
+  end
   return serverId == nil or tostring(sender) == tostring(serverId)
 end
 
@@ -5398,7 +5436,9 @@ function kioskNetworkLoop()
     else
       local ok, sender, message = receiveRednet(0.5)
       if ok and type(message) == "table" then
-        if message.op == "alarm_state" then
+        if kioskControllerEnabled() and (message.op == "controller_endpoint" or message.op == "controller_scan" or message.op == "controller_ping") then
+          handleControllerMessage(sender, message)
+        elseif message.op == "alarm_state" then
           kioskApplyAlarmMessage(message, sender)
         elseif message.op == "notification" then
           kioskApplyNotification(message.notification, sender, message)
@@ -5435,7 +5475,9 @@ function kioskHandleRawRednetMessage(sender, message, protocol)
   end
 
   if type(message) == "table" then
-    if message.op == "alarm_state" then
+    if kioskControllerEnabled() and (message.op == "controller_endpoint" or message.op == "controller_scan" or message.op == "controller_ping") then
+      handleControllerMessage(sender, message)
+    elseif message.op == "alarm_state" then
       kioskApplyAlarmMessage(message, sender)
     elseif message.op == "notification" then
       kioskApplyNotification(message.notification, sender, message)
@@ -5460,6 +5502,50 @@ function kioskAlarmSpeakerLoop()
       state.kiosk.lastAlarmSound = 0
     end
     sleep(0.1)
+  end
+end
+
+function kioskLocalControllerLoop()
+  local options = kioskControllerOptions()
+  local pollSeconds = tonumber(options.pollSeconds) or 0.25
+  local helloSeconds = tonumber(options.helloSeconds) or 30
+  local pollTimer = os.startTimer(pollSeconds)
+  local helloTimer = os.startTimer(1)
+
+  while state.kiosk.running do
+    local event = { os.pullEventRaw() }
+    local name = event[1]
+
+    if name == "timer" and event[2] == pollTimer then
+      if kioskControllerCredentialForwarding() then
+        controllerPollLocalCredentials()
+      end
+      options = kioskControllerOptions()
+      pollSeconds = tonumber(options.pollSeconds) or 0.25
+      pollTimer = os.startTimer(pollSeconds)
+    elseif name == "timer" and event[2] == helloTimer then
+      if kioskControllerEnabled() then
+        broadcastControllerHello()
+      end
+      options = kioskControllerOptions()
+      helloSeconds = tonumber(options.helloSeconds) or 30
+      helloTimer = os.startTimer(helloSeconds)
+    elseif name == "nfc_data" and kioskControllerCredentialForwarding() then
+      local source = event[2] or "nfc"
+      local data = tostring(event[3] or "")
+      if data ~= "" then
+        local candidates, meta = badgeAliases("nfc", data)
+        meta.source = source
+        sendControllerCredential({
+          source = source,
+          kind = "nfc",
+          candidates = candidates,
+          meta = meta,
+        })
+      end
+    elseif (name == "peripheral" or name == "peripheral_detach") and kioskControllerEnabled() then
+      broadcastControllerHello()
+    end
   end
 end
 
@@ -5872,6 +5958,74 @@ function kioskSetupRequest(serverId, token, payload)
   return kioskRequest(serverId, "kiosk_setup", payload, 4)
 end
 
+function kioskDefaultController()
+  if kioskControllerEnabled() then
+    return kioskControllerId()
+  end
+  return "server"
+end
+
+function kioskReaderSourcePrompt(defaultPeripheral)
+  if kioskControllerEnabled() and kioskPromptBool("Use reader attached to this kiosk/controller", true) then
+    local peripheralName = kioskPromptLine("  Local reader peripheral", defaultPeripheral or "rfid_scanner_0")
+    return controllerCredentialSource(peripheralName)
+  end
+  return kioskPromptLine("Reader source", "")
+end
+
+function saveKioskControllerSetting(enabled)
+  config.kiosk = config.kiosk or {}
+  config.kiosk.controller = config.kiosk.controller or {}
+  config.kiosk.controller.enabled = enabled and true or false
+  config.kiosk.controller.permanent = enabled and true or false
+  if config.kiosk.controller.credentialForwarding == nil then
+    config.kiosk.controller.credentialForwarding = true
+  end
+  if config.kiosk.controller.pollSeconds == nil then
+    config.kiosk.controller.pollSeconds = 0.25
+  end
+  if config.kiosk.controller.helloSeconds == nil then
+    config.kiosk.controller.helloSeconds = 30
+  end
+  saveConfig()
+  if enabled then
+    broadcastControllerHello()
+  end
+end
+
+function kioskLocalControllerSetup()
+  while true do
+    clearScreen()
+    print("Local Door Controller")
+    print("Computer id: " .. tostring(localComputerId() or "?"))
+    print("Enabled: " .. tostring(kioskControllerEnabled()))
+    print("Reader source prefix:")
+    print("controller:" .. tostring(localComputerId() or "?") .. ":<peripheral>")
+    print()
+    print("1. Enable permanently")
+    print("2. Disable")
+    print("3. Show local peripherals")
+    print("B. Back")
+    local choice = string.lower(kioskRead("> "))
+
+    if choice == "1" then
+      saveKioskControllerSetting(true)
+      print("This kiosk is now a persistent door controller.")
+      print("Use controller id " .. tostring(localComputerId() or "?") .. " when adding doors.")
+      pause()
+    elseif choice == "2" then
+      saveKioskControllerSetting(false)
+      print("Local controller mode disabled.")
+      pause()
+    elseif choice == "3" then
+      printPeripheralSummary(peripheralSummary())
+      pause()
+    elseif choice == "b" then
+      return
+    end
+  end
+end
+
 function kioskPromptLine(label, defaultValue)
   local prompt = label .. (defaultValue ~= nil and defaultValue ~= "" and (" [" .. tostring(defaultValue) .. "]") or "") .. ": "
   local value = kioskRead(prompt)
@@ -5916,6 +6070,8 @@ end
 
 function kioskPrintSetupSummary(summary)
   print("Server computer: " .. tostring(summary.computerId or "?"))
+  print("This kiosk id: " .. tostring(localComputerId() or "?"))
+  print("This kiosk controller: " .. tostring(kioskControllerEnabled()))
   print("Setup clearance: C" .. tostring(summary.setupClearance or "?"))
   print("Doors")
   for _, door in ipairs(summary.doors or {}) do
@@ -5930,7 +6086,7 @@ function kioskPrintPeripheralSummary(items)
 end
 
 function kioskSetupAddDoor(serverId, token)
-  local controller = kioskPromptLine("Controller id blank/server=server", "server")
+  local controller = kioskPromptLine("Controller id blank/server=server", kioskDefaultController())
   local payload = {
     action = "add_door",
     id = kioskPromptLine("Door id", nil),
@@ -5949,7 +6105,7 @@ function kioskSetupAddDoor(serverId, token)
     payload.requestExit = kioskEndpointPrompt("Exit button endpoint", "right", controller)
     payload.exitActiveWhen = kioskPromptBool("Exit active when pressed", true)
   end
-  payload.reader = kioskPromptLine("Reader source blank=skip", "")
+  payload.reader = kioskReaderSourcePrompt("rfid_scanner_0")
 
   local reply = kioskSetupRequest(serverId, token, payload)
   print(reply.ok and tostring(reply.message or "Saved.") or ("Denied/failed: " .. tostring(reply.error)))
@@ -5978,7 +6134,7 @@ function kioskSetupAddSensor(serverId, token)
     payload.min = kioskPromptNumber("Alarm below blank=none", nil)
   else
     payload.sensorType = "redstone"
-    payload.controller = kioskPromptLine("Controller id blank/server=server", "server")
+    payload.controller = kioskPromptLine("Controller id blank/server=server", kioskDefaultController())
     payload.input = kioskEndpointPrompt("Input endpoint", "left", payload.controller)
     payload.alarmWhen = kioskPromptBool("Active means fault", true)
   end
@@ -5989,7 +6145,7 @@ function kioskSetupAddSensor(serverId, token)
 end
 
 function kioskSetupAddEmergency(serverId, token)
-  local controller = kioskPromptLine("Controller id blank/server=server", "server")
+  local controller = kioskPromptLine("Controller id blank/server=server", kioskDefaultController())
   local payload = {
     action = "add_emergency",
     name = kioskPromptLine("Button name", "Emergency Button"),
@@ -6007,7 +6163,7 @@ end
 function kioskSetupMapReader(serverId, token)
   local reply = kioskSetupRequest(serverId, token, {
     action = "map_reader",
-    source = kioskPromptLine("Reader source", ""),
+    source = kioskReaderSourcePrompt("rfid_scanner_0"),
     door = kioskPromptLine("Door id", ""),
   })
   print(reply.ok and tostring(reply.message or "Saved.") or ("Denied/failed: " .. tostring(reply.error)))
@@ -6062,6 +6218,7 @@ function kioskSetupMenu(serverId, brand, token, user)
     if canIssueBadges then
       print("8. Issue/write employee badge")
     end
+    print("9. This kiosk door-controller mode")
     print("B. Back")
 
     local choice = string.lower(kioskRead("> "))
@@ -6101,6 +6258,8 @@ function kioskSetupMenu(serverId, brand, token, user)
       kioskSetupMapReader(serverId, token)
     elseif choice == "8" and canIssueBadges then
       kioskSetupIssueBadge(serverId, token)
+    elseif choice == "9" then
+      kioskLocalControllerSetup()
     elseif choice == "b" then
       return true
     end
@@ -6323,7 +6482,7 @@ function kioskMain()
   drawMonitors(true)
 
   local ok, err = pcall(function()
-    parallel.waitForAny(kioskUiLoop, kioskNetworkLoop, kioskAlarmSpeakerLoop, kioskMonitorLoop, kioskMaintenanceLoop)
+    parallel.waitForAny(kioskUiLoop, kioskNetworkLoop, kioskAlarmSpeakerLoop, kioskMonitorLoop, kioskMaintenanceLoop, kioskLocalControllerLoop)
   end)
 
   state.kiosk.running = false

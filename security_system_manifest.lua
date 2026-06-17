@@ -71,6 +71,8 @@ return {
         "kiosk_setup",
         "kiosk_badge_login",
         "controller_credential",
+        "kioskLocalControllerLoop",
+        "kiosk.controller",
         "function main()",
         "return {",
       },

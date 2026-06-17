@@ -28,6 +28,13 @@ return {
     quitClearance = 5,
     autoLogoutSeconds = 600,
     autoRebootLoggedOutSeconds = 1800,
+    controller = {
+      enabled = false,
+      permanent = false,
+      credentialForwarding = true,
+      helloSeconds = 30,
+      pollSeconds = 0.25,
+    },
   },
 
   notifications = {
@@ -72,9 +79,9 @@ return {
   },
 
   branding = {
-    facilityName = "North Ridge Facility",
-    shortName = "NRF",
-    kioskTitle = "Employee Kiosk",
+    facilityName = "F-Aperture",
+    shortName = "FAP",
+    kioskTitle = "Employee Terminal",
     motto = "Connect to the facility server to continue.",
     primaryColor = "blue",
     accentColor = "lime",

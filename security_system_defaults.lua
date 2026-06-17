@@ -125,6 +125,13 @@ return {
     quitClearance = 5,
     autoLogoutSeconds = 600,
     autoRebootLoggedOutSeconds = 1800,
+    controller = {
+      enabled = false,
+      permanent = false,
+      credentialForwarding = true,
+      helloSeconds = 30,
+      pollSeconds = 0.25,
+    },
   },
 
   notifications = {
