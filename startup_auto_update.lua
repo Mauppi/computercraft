@@ -13,6 +13,7 @@ local ANNOUNCEMENTS_MODULE_FILE = "security_system_announcements.lua"
 local CONFIG_FILE = "security_config.lua"
 local KIOSK_CONFIG_EXAMPLE = "security_kiosk_config.example.lua"
 local INSTALL_SUBDIR = "security_system"
+local MIN_DISK_INSTALL_FREE = 384000
 local INSTALL_ROOT = ""
 local INSTALL_DESCRIPTION = "computer storage"
 
@@ -147,8 +148,14 @@ local function writableDir(path)
   if not handle then
     return false
   end
-  handle.write("ok")
-  handle.close()
+  local writeOk = pcall(handle.write, "ok")
+  pcall(handle.close)
+  if not writeOk then
+    if fs.exists(testPath) then
+      pcall(fs.delete, testPath)
+    end
+    return false
+  end
   if fs.exists(testPath) then
     fs.delete(testPath)
   end
@@ -249,8 +256,13 @@ local function selectInstallRoot()
 
   if bestRoot then
     INSTALL_ROOT = bestRoot
-    INSTALL_DESCRIPTION = "disk " .. tostring(bestMount) .. " (" .. INSTALL_ROOT .. ")"
-    configurePackagePath()
+    if bestFree >= MIN_DISK_INSTALL_FREE then
+      INSTALL_DESCRIPTION = "disk " .. tostring(bestMount) .. " (" .. INSTALL_ROOT .. ")"
+      configurePackagePath()
+    else
+      INSTALL_ROOT = ""
+      INSTALL_DESCRIPTION = "computer storage (disk " .. tostring(bestMount) .. " only has " .. tostring(bestFree) .. " bytes free)"
+    end
   end
 
   return INSTALL_DESCRIPTION
@@ -373,12 +385,25 @@ end
 
 local function writeFile(path, data, binary)
   ensureParentDir(path)
+  local dir = fs.getDir(path)
+  local spacePath = (dir and dir ~= "") and dir or ""
+  local available = freeSpace(spacePath)
+  if available > 0 and available < #data then
+    return false, "not enough free space for " .. tostring(path) .. " (" .. tostring(#data) .. " bytes needed, " .. tostring(available) .. " free)"
+  end
+
   local handle = openFile(path, binary and "wb" or "w", binary and "w" or nil)
   if not handle then
-    return false
+    return false, "open failed"
   end
-  handle.write(data)
-  handle.close()
+  local ok, err = pcall(handle.write, data)
+  pcall(handle.close)
+  if not ok then
+    if fs.exists(path) then
+      pcall(fs.delete, path)
+    end
+    return false, tostring(err or "write failed")
+  end
   return true
 end
 
@@ -524,16 +549,35 @@ local function validateFile(file, body)
   return true
 end
 
-local function backupFile(path)
+local function backupFile(path, nextSize)
   if not fs.exists(path) then
-    return
+    return true, "no existing file"
   end
 
   local backup = path .. ".bak"
   if fs.exists(backup) then
-    fs.delete(backup)
+    pcall(fs.delete, backup)
   end
-  fs.copy(path, backup)
+
+  local currentSize = 0
+  if fs.getSize then
+    local okSize, size = pcall(fs.getSize, path)
+    if okSize then
+      currentSize = tonumber(size) or 0
+    end
+  end
+  local dir = fs.getDir(path)
+  local available = freeSpace((dir and dir ~= "") and dir or "")
+  local neededForBackup = currentSize + (tonumber(nextSize) or 0)
+  if available > 0 and neededForBackup > available then
+    return false, "skipped backup: " .. tostring(neededForBackup) .. " bytes needed, " .. tostring(available) .. " free"
+  end
+
+  local ok, err = pcall(fs.copy, path, backup)
+  if not ok then
+    return false, tostring(err or "backup failed")
+  end
+  return true, "backup written"
 end
 
 local function openRednetModems()
@@ -619,7 +663,7 @@ local function syncConfigFromSecurityServer(mode)
         if oldText == newText then
           return true, "config already current from server " .. tostring(sender), false
         end
-        backupFile(configPath())
+        backupFile(configPath(), #newText)
         writeFile(configPath(), newText)
         return true, "config synced from server " .. tostring(sender), true
       end
@@ -678,9 +722,18 @@ local function updateOneFile(baseUrl, file)
     return true, "current", false
   end
 
-  backupFile(target)
-  if not writeFile(target, body, binary) then
-    return false, "write failed", false
+  local backupOk = backupFile(target, #body)
+  if fs.exists(target) then
+    pcall(fs.delete, target)
+  end
+
+  local writeOk, writeErr = writeFile(target, body, binary)
+  if not writeOk then
+    local backup = target .. ".bak"
+    if fs.exists(backup) and not fs.exists(target) then
+      pcall(fs.copy, backup, target)
+    end
+    return false, writeErr or "write failed", false
   end
   return true, "updated", true
 end
@@ -791,8 +844,9 @@ local function installServerConfigIfMissing(mode)
     return false, tostring(path) .. ": " .. tostring(validErr), false
   end
 
-  if not writeFile(target, body, false) then
-    return false, "could not write " .. target, false
+  local writeOk, writeErr = writeFile(target, body, false)
+  if not writeOk then
+    return false, "could not write " .. target .. ": " .. tostring(writeErr), false
   end
   return true, "installed " .. target .. " from " .. tostring(path) .. " (" .. tostring(manifestSource) .. ")", true
 end
