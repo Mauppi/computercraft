@@ -23,6 +23,8 @@ return {
 
   configSync = {
     enabled = true,
+    includeMonitors = true,
+    includeAnnouncements = true,
     includeAlarm = true,
   },
 
@@ -71,9 +73,129 @@ return {
     volume = 1,
     sampleRate = 48000,
     maxSamples = 128000,
+    chunkSamples = 48000,
+    streamGraceSeconds = 20,
+    watchdogSeconds = 0.2,
+    serverPlayback = true,
+    alarmAnnouncements = true,
     syncAssets = true,
     assetsRequired = false,
     -- assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
+    characterSeconds = 0.055,
+    spaceSeconds = 0.075,
+    maxCharacters = 96,
+    auto = {
+      enabled = true,
+      intervalSeconds = 30,
+    },
+    lines = {
+      "Remember: report hazards before hazards report you.",
+      { text = "Facility notice: keep badges visible in restricted areas.", voiceLine = "memeorpo" },
+      { text = "Facility notice: keep badges visible in restricted areas.", voiceLine = "slopday" },
+      { text = "Facility notice: keep badges visible in restricted areas.", voiceLine = "slopday_cancelled" },
+      { text = "Facility notice: keep badges visible in restricted areas.", voiceLine = "slopday_slop" },
+    },
+    eventAnnouncements = true,
+    events = {
+      alarm = {
+        title = "Security Alarm",
+        voiceLine = "alarm",
+        cooldownSeconds = 2,
+        variations = {
+          "Security alarm engaged. Cause: {reason}.",
+          "Attention personnel. Security response required. {reason}.",
+          "{facility} alarm condition active. Await clearance.",
+        },
+      },
+      emergency = {
+        title = "Emergency Alarm",
+        voiceLine = "alarm",
+        cooldownSeconds = 2,
+        variations = {
+          "Emergency alarm engaged. Follow facility response procedures.",
+          "Emergency condition declared. Move with purpose and await instruction.",
+          "{facility} emergency response is now active.",
+        },
+      },
+      alarm_reset = {
+        title = "Alarm Reset",
+        voiceLine = "alarm_clear",
+        cooldownSeconds = 2,
+        variations = {
+          "Alarm condition cleared. Resume normal duties.",
+          "Security alarm reset. Continue monitoring your area.",
+          "{facility} alarm state has returned to clear.",
+        },
+      },
+      lockdown = {
+        title = "Lockdown Active",
+        voiceLine = "lockdown",
+        cooldownSeconds = 2,
+        variations = {
+          "Lockdown engaged. Secure your area and await authorization.",
+          "{facility} lockdown is active. Remain at your assigned station.",
+          "Access restrictions engaged. Lockdown procedures are in effect.",
+        },
+      },
+      lockdown_clear = {
+        title = "Lockdown Clear",
+        voiceLine = "lockdown_clear",
+        cooldownSeconds = 2,
+        variations = {
+          "Lockdown cleared. Normal access may resume.",
+          "{facility} lockdown has been lifted.",
+          "Access restrictions cleared. Thank you for your compliance.",
+        },
+      },
+    },
+    actions = {
+      SENSOR_FAULT = {
+        enabled = false,
+        title = "Facility Fault",
+        cooldownSeconds = 20,
+        variations = {
+          "Facility sensor fault detected at {sensor}.",
+          "Maintenance attention requested for sensor {sensor}.",
+          "Fault condition logged. Sensor source: {sensor}.",
+        },
+      },
+      REMOTE_SENSOR_FAULT = {
+        enabled = false,
+        title = "Remote Facility Fault",
+        cooldownSeconds = 20,
+        variations = {
+          "Remote sensor fault reported by controller {sender}.",
+          "Remote facility fault detected at {sensor}.",
+          "Remote fault report received. Profile: {profile}.",
+        },
+      },
+      SENSOR_CLEAR = {
+        title = "Facility Fault Clear",
+        cooldownSeconds = 20,
+        chance = 0.5,
+        variations = {
+          "Sensor {sensor} has returned to normal.",
+          "Fault clear logged for {sensor}.",
+        },
+      },
+      BADGE_ISSUE = {
+        title = "Badge Issued",
+        cooldownSeconds = 4,
+        variations = {
+          "Badge credentials issued for {user}.",
+          "Employee badge record updated for {user}.",
+        },
+      },
+      SETUP_CHANGE = {
+        title = "Facility Setup Updated",
+        cooldownSeconds = 6,
+        chance = 0.5,
+        variations = {
+          "Facility configuration updated by {actor}.",
+          "Setup change recorded: {action}.",
+        },
+      },
+    },
     voiceLines = {
       memeorpo = { files = { "announcements/vo_memeorpo.wav" } },
       lockdown = { files = { "announcements/vo_lockdown.wav", "announcements/vo_engaged.wav" } },
@@ -95,6 +217,10 @@ return {
         tones = {
         },
       },
+    },
+    fallbackSounds = {
+    },
+    alarmFallbackSounds = {
     },
   },
 

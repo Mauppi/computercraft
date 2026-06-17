@@ -375,10 +375,10 @@ function installKioskConfigIfMissing()
   handle.writeLine("return {")
   handle.writeLine("  mode = \"kiosk\",")
   handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },")
-  handle.writeLine("  configSync = { enabled = true, includeAlarm = true },")
+  handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
   handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 128000, streamGraceSeconds = 6, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 48000, streamGraceSeconds = 20, watchdogSeconds = 0.2, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
@@ -1224,9 +1224,28 @@ function sendNotificationPayload(target, notification, targetUser)
   return pcall(sendRednet, target, payload)
 end
 
+function notificationUsesAnnouncementAudio(notification)
+  if type(notification) ~= "table" then
+    return false
+  end
+  local kind = tostring(notification.kind or notification.type or "")
+  return notification.announcement == true or kind == "announcement" or kind == "alarm" or kind == "emergency" or kind == "lockdown" or kind == "lockdown_clear"
+end
+
 function broadcastKioskNotification(notification, targetUser)
   local options = notificationConfig()
-  if options.enabled == false or not (config and config.rednet and config.rednet.enabled and rednet) then
+  if options.enabled == false then
+    return
+  end
+
+  if not targetUser and notificationUsesAnnouncementAudio(notification) then
+    local announcements = config.announcements or {}
+    if announcements.serverPlayback ~= false and announcements.localPlayback ~= false then
+      pcall(playFacilityAnnouncement, notification)
+    end
+  end
+
+  if not (config and config.rednet and config.rednet.enabled and rednet) then
     return
   end
 
@@ -1981,7 +2000,8 @@ function announcementAudioConfig()
     sampleRate = audio.sampleRate or announcements.sampleRate or 48000,
     chunkSamples = audio.chunkSamples or announcements.chunkSamples or audio.playbackSamples or announcements.playbackSamples or announcements.maxSamples or 128000,
     volume = announcements.volume or audio.volume or 1,
-    streamGraceSeconds = announcements.streamGraceSeconds or audio.streamGraceSeconds or 6,
+    streamGraceSeconds = audio.streamGraceSeconds or announcements.streamGraceSeconds or 12,
+    watchdogSeconds = audio.watchdogSeconds or announcements.watchdogSeconds or 0.2,
   }
 end
 
@@ -2001,7 +2021,14 @@ function announcementPlaybackChunkSize()
   return chunkSamples
 end
 
-function clearAnnouncementAudioStreams()
+function clearAnnouncementAudioStreams(stopSpeakers)
+  if stopSpeakers and type(state.announcements.audioStreams) == "table" then
+    for _, stream in pairs(state.announcements.audioStreams) do
+      if stream.speaker and stream.speaker.stop then
+        pcall(stream.speaker.stop)
+      end
+    end
+  end
   state.announcements.audioStreams = {}
   state.announcements.audioPlayingUntil = 0
   state.announcements.audioGeneration = (state.announcements.audioGeneration or 0) + 1
@@ -2024,14 +2051,16 @@ function announcementAudioBusy()
 end
 
 function announcementFeedSpeakerStream(speakerName)
-  if state.alarm.active or alarmAudioBusy() then
-    state.announcements.audioStreams = {}
-    return false
-  end
-
   local stream = state.announcements.audioStreams and state.announcements.audioStreams[speakerName]
   if not stream then
     return false
+  end
+  if (state.alarm.active or alarmAudioBusy()) and not stream.allowDuringAlarm then
+    clearAnnouncementAudioStreams(true)
+    return false
+  end
+  if stream.allowDuringAlarm and alarmAudioBusy() then
+    clearAlarmAudioStreams(true)
   end
   if stream.generation ~= state.announcements.audioGeneration then
     state.announcements.audioStreams[speakerName] = nil
@@ -2066,6 +2095,16 @@ function announcementFeedSpeakerStream(speakerName)
   return true
 end
 
+function feedAnnouncementAudioStreams()
+  local names = {}
+  for name in pairs(state.announcements.audioStreams or {}) do
+    table.insert(names, name)
+  end
+  for _, name in ipairs(names) do
+    announcementFeedSpeakerStream(name)
+  end
+end
+
 function handleAnnouncementSpeakerAudioEmpty(speakerName)
   if type(speakerName) ~= "string" then
     return false
@@ -2073,8 +2112,9 @@ function handleAnnouncementSpeakerAudioEmpty(speakerName)
   return announcementFeedSpeakerStream(speakerName)
 end
 
-function startAnnouncementAudioStream(speakerName, speaker, pcm, volume)
-  if state.alarm.active or alarmAudioBusy() then
+function startAnnouncementAudioStream(speakerName, speaker, pcm, volume, options)
+  options = options or {}
+  if ((state.alarm.active or alarmAudioBusy()) and not options.allowDuringAlarm) or ((not options.allowExisting) and announcementAudioBusy()) then
     return false
   end
   if not (speaker and speaker.playAudio and type(pcm) == "table" and #pcm > 0) then
@@ -2095,8 +2135,9 @@ function startAnnouncementAudioStream(speakerName, speaker, pcm, volume)
     volume = volume,
     nextIndex = 1,
     chunkSamples = announcementPlaybackChunkSize(),
-    generation = state.announcements.audioGeneration or 0,
+    generation = options.generation or state.announcements.audioGeneration or 0,
     deadline = os.clock() + duration + (tonumber(audioConfig.streamGraceSeconds) or 6),
+    allowDuringAlarm = options.allowDuringAlarm and true or false,
   }
 
   local queued = announcementFeedSpeakerStream(speakerName)
@@ -2115,22 +2156,36 @@ function announcementFallbackSounds(announcement)
   }
 end
 
+function announcementIsAlarmLike(announcement)
+  local kind = tostring((announcement and (announcement.kind or announcement.type)) or "")
+  return kind == "alarm" or kind == "emergency" or kind == "lockdown"
+end
+
 function playFacilityAnnouncement(announcement)
   local announcements = config.announcements or {}
   if announcements.enabled == false or announcements.sound == false then
     return false
   end
-  if state.alarm.active or alarmAudioBusy() then
+  local alarmLike = announcementIsAlarmLike(announcement)
+  local allowDuringAlarm = alarmLike and announcements.alarmAnnouncements ~= false
+  if (state.alarm.active or alarmAudioBusy()) and not allowDuringAlarm then
     return false
+  end
+  if allowDuringAlarm and alarmAudioBusy() then
+    clearAlarmAudioStreams(true)
   end
 
   local pcm = facilityAnnouncements.buildAnnouncementBuffer(announcement, announcements)
+  if not (type(pcm) == "table" and #pcm > 0) then
+    return false
+  end
   clearAnnouncementAudioStreams()
   local volume = tonumber(announcements.volume) or 1
   local played = false
+  local generation = state.announcements.audioGeneration or 0
   if type(pcm) == "table" and #pcm > 0 then
     for _, entry in ipairs(findSpeakerEntries()) do
-      if startAnnouncementAudioStream(entry.name, entry.speaker, pcm, volume) then
+      if startAnnouncementAudioStream(entry.name, entry.speaker, pcm, volume, { allowExisting = true, allowDuringAlarm = allowDuringAlarm, generation = generation }) then
         played = true
       end
     end
@@ -2201,7 +2256,7 @@ function playAlarmPulse()
     return false
   end
 
-  if alarmAudioBusy() then
+  if alarmAudioBusy() or announcementAudioBusy() then
     return false
   end
 
@@ -2245,6 +2300,9 @@ function alarmNextPulseDelay()
   if alarmAudioBusy() then
     return math.max(0.1, ((tonumber(state.alarm.audioPlayingUntil) or os.clock()) - os.clock()) + alarmLoopGap(profile))
   end
+  if announcementAudioBusy() then
+    return 0.2
+  end
   return tonumber(profile.repeatSeconds) or 1.5
 end
 
@@ -2260,7 +2318,7 @@ function raiseAlarm(reason, doorId, actor, profileName)
     if profileName == "emergency" and state.alarm.profile ~= "emergency" then
       setAlarmOutputs(false)
       clearAlarmAudioStreams(true)
-      clearAnnouncementAudioStreams()
+      clearAnnouncementAudioStreams(true)
       state.alarm.reason = reason or "emergency"
       state.alarm.door = doorId
       state.alarm.actor = actor
@@ -2311,7 +2369,7 @@ function raiseAlarm(reason, doorId, actor, profileName)
   state.alarm.soundStartAt = state.alarm.sinceMillis + alarmSyncLeadMillis(alarmProfile(profileName))
   state.alarm.soundIndex = 1
   clearAlarmAudioStreams(true)
-  clearAnnouncementAudioStreams()
+  clearAnnouncementAudioStreams(true)
 
   local profile = alarmProfile(profileName)
   broadcastAlarmState()
@@ -6771,6 +6829,9 @@ function kioskApplyNotification(notification, sender, envelope)
   if item then
     if item.alarm and (item.kind == "alarm" or item.kind == "emergency") then
       kioskApplyAlarmMessage({ alarm = item.alarm }, sender)
+      if notificationUsesAnnouncementAudio(item) then
+        playFacilityAnnouncement(item)
+      end
     elseif item.announcement == true or item.kind == "announcement" or item.kind == "alarm" or item.kind == "emergency" or item.kind == "lockdown" then
       playFacilityAnnouncement(item)
     else
@@ -7037,10 +7098,23 @@ function kioskAlarmSpeakerLoop()
 end
 
 function alarmAudioStreamLoop()
+  local audioConfig = announcementAudioConfig()
+  local watchdogSeconds = tonumber(audioConfig.watchdogSeconds) or 0.2
+  local watchdogTimer = os.startTimer(watchdogSeconds)
   while state.running or state.kiosk.running do
-    local event = { os.pullEventRaw("speaker_audio_empty") }
-    if not handleAlarmSpeakerAudioEmpty(event[2]) then
-      handleAnnouncementSpeakerAudioEmpty(event[2])
+    local event = { os.pullEventRaw() }
+    if event[1] == "speaker_audio_empty" then
+      if not handleAlarmSpeakerAudioEmpty(event[2]) then
+        handleAnnouncementSpeakerAudioEmpty(event[2])
+      end
+    elseif event[1] == "timer" and event[2] == watchdogTimer then
+      feedAnnouncementAudioStreams()
+      audioConfig = announcementAudioConfig()
+      watchdogSeconds = tonumber(audioConfig.watchdogSeconds) or 0.2
+      if watchdogSeconds < 0.05 then
+        watchdogSeconds = 0.05
+      end
+      watchdogTimer = os.startTimer(watchdogSeconds)
     end
   end
 end
