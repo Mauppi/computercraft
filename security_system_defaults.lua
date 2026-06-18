@@ -194,6 +194,9 @@ return {
     tailSeconds = 0.5,
     maxChunksPerFeed = 8,
     prebufferSeconds = 2.5,
+    syncLeadSeconds = 1.5,
+    syncToleranceSeconds = 0.08,
+    syncSkipLate = true,
     serverPlayback = true,
     alarmAnnouncements = true,
     syncAssets = true,
@@ -396,6 +399,8 @@ return {
   alarm = {
     repeatSeconds = 1.5,
     syncLeadSeconds = 1.5,
+    syncToleranceSeconds = 0.08,
+    syncSkipLate = true,
     deniedBeforeAlarm = 3,
     chat = true,
     sampleRate = 48000,

@@ -61,6 +61,7 @@ local state = {
     notificationSeen = {},
     lastActivity = 0,
     loggedOutSince = 0,
+    clockOffsetMillis = 0,
   },
   announcements = {
     index = 0,
@@ -378,7 +379,7 @@ function installKioskConfigIfMissing()
   handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
   handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.05, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.05, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
@@ -639,6 +640,51 @@ function nowMillis()
     end
   end
   return math.floor(os.clock() * 1000)
+end
+
+function rednetTimestampMillis()
+  return nowMillis()
+end
+
+function stampOutboundRednetMessage(message)
+  if type(message) ~= "table" then
+    return message
+  end
+
+  local sentAt = rednetTimestampMillis()
+  message.sentAtMillis = sentAt
+  local mode = string.lower(tostring(config and config.mode or "server"))
+  if mode == "" or mode == "server" then
+    message.serverTimeMillis = sentAt
+  end
+  return message
+end
+
+function updateKioskClockOffset(message, sender)
+  if type(message) ~= "table" then
+    return
+  end
+
+  local serverMillis = tonumber(message.serverTimeMillis or (message.status and message.status.serverTimeMillis))
+  if not serverMillis and sender and state.kiosk and state.kiosk.serverId and tostring(sender) == tostring(state.kiosk.serverId) then
+    serverMillis = tonumber(message.sentAtMillis)
+  end
+  if not serverMillis then
+    return
+  end
+
+  state.kiosk.clockOffsetMillis = serverMillis - nowMillis()
+end
+
+function serverMillisToLocalMillis(value)
+  value = tonumber(value)
+  if not value then
+    return nil
+  end
+  if tostring(config and config.mode or "") ~= "kiosk" then
+    return value
+  end
+  return value - (tonumber(state.kiosk and state.kiosk.clockOffsetMillis) or 0)
 end
 
 function makeId(prefix)
@@ -1129,6 +1175,8 @@ function alarmProfile(profileName)
     dsp = profile.dsp or alarm.dsp,
     audio = profile.audio or alarm.audio,
     syncLeadSeconds = profile.syncLeadSeconds or alarm.syncLeadSeconds or 1.5,
+    syncToleranceSeconds = profile.syncToleranceSeconds or alarm.syncToleranceSeconds,
+    syncSkipLate = profile.syncSkipLate ~= nil and profile.syncSkipLate or alarm.syncSkipLate,
     sampleRate = profile.sampleRate or alarm.sampleRate,
     maxSamples = profile.maxSamples or alarm.maxSamples,
     volume = profile.volume or alarm.volume,
@@ -1164,6 +1212,7 @@ function alarmStatePayload()
   local brand = displayBranding()
   return {
     op = "alarm_state",
+    serverTimeMillis = nowMillis(),
     branding = {
       facilityName = brand.facilityName,
       shortName = brand.shortName,
@@ -1212,6 +1261,7 @@ function makeNotification(kind, title, text, severity, extra)
   notification.text = text or notification.text or ""
   notification.severity = severity or notification.severity or "info"
   notification.createdAt = notification.createdAt or timestamp()
+  notification.createdAtMillis = notification.createdAtMillis or nowMillis()
   return notification
 end
 
@@ -1220,6 +1270,7 @@ function sendNotificationPayload(target, notification, targetUser)
     op = "notification",
     notification = notification,
     target = targetUser,
+    serverTimeMillis = nowMillis(),
   }
   return pcall(sendRednet, target, payload)
 end
@@ -1230,6 +1281,65 @@ function notificationUsesAnnouncementAudio(notification)
   end
   local kind = tostring(notification.kind or notification.type or "")
   return notification.announcement == true or kind == "announcement" or kind == "alarm" or kind == "emergency" or kind == "lockdown" or kind == "lockdown_clear"
+end
+
+function announcementSyncLeadMillis()
+  local announcements = config and config.announcements or {}
+  local audio = type(announcements.audio) == "table" and announcements.audio or {}
+  local seconds = tonumber(audio.syncLeadSeconds or announcements.syncLeadSeconds) or 1.5
+  if seconds < 0 then
+    seconds = 0
+  end
+  return math.floor((seconds * 1000) + 0.5)
+end
+
+function notificationScheduledStartMillis(notification)
+  if type(notification) ~= "table" then
+    return nil
+  end
+  return tonumber(notification.soundStartAt or notification.announcementStartAt or notification.playAtMillis or notification.startAtMillis)
+end
+
+function setNotificationScheduledStart(notification, startAt)
+  if type(notification) ~= "table" or not startAt then
+    return
+  end
+  notification.soundStartAt = startAt
+  notification.announcementStartAt = startAt
+  notification.playAtMillis = startAt
+end
+
+function ensureNotificationPlaybackSchedule(notification)
+  if type(notification) ~= "table" then
+    return notification
+  end
+
+  notification.sentAtMillis = nowMillis()
+  if not notificationUsesAnnouncementAudio(notification) then
+    return notification
+  end
+
+  local startAt = notificationScheduledStartMillis(notification)
+  if not startAt and type(notification.alarm) == "table" then
+    startAt = tonumber(notification.alarm.soundStartAt)
+  end
+  if not startAt then
+    startAt = nowMillis() + announcementSyncLeadMillis()
+  end
+  setNotificationScheduledStart(notification, startAt)
+  return notification
+end
+
+function normalizeNotificationTimingFromServer(notification, envelope, sender)
+  updateKioskClockOffset(envelope, sender)
+  if type(notification) ~= "table" then
+    return
+  end
+
+  local startAt = notificationScheduledStartMillis(notification)
+  if startAt then
+    setNotificationScheduledStart(notification, serverMillisToLocalMillis(startAt))
+  end
 end
 
 function announcementKindValue(announcement)
@@ -1283,14 +1393,18 @@ function broadcastKioskNotification(notification, targetUser)
     return
   end
 
-  if not targetUser and notificationUsesAnnouncementAudio(notification) then
+  ensureNotificationPlaybackSchedule(notification)
+  local useAnnouncementAudio = notificationUsesAnnouncementAudio(notification)
+  local playOnServer = false
+  if not targetUser and useAnnouncementAudio then
     local announcements = config.announcements or {}
-    if announcements.serverPlayback ~= false and announcements.localPlayback ~= false then
-      pcall(playFacilityAnnouncement, notification)
-    end
+    playOnServer = announcements.serverPlayback ~= false and announcements.localPlayback ~= false
   end
 
   if not (config and config.rednet and config.rednet.enabled and rednet) then
+    if playOnServer then
+      pcall(playFacilityAnnouncement, notification)
+    end
     return
   end
 
@@ -1307,7 +1421,11 @@ function broadcastKioskNotification(notification, targetUser)
   pcall(broadcastRednet, {
     op = "notification",
     notification = notification,
+    serverTimeMillis = nowMillis(),
   })
+  if playOnServer then
+    pcall(playFacilityAnnouncement, notification)
+  end
 end
 
 function announcementConfig()
@@ -1856,6 +1974,8 @@ function alarmAudioConfig(profile)
     maxSamples = audio.maxSamples or profile.maxSamples or dsp.maxSamples or 128000,
     chunkSamples = audio.chunkSamples or profile.chunkSamples or audio.playbackSamples or profile.playbackSamples or 128000,
     loopGapSeconds = audio.loopGapSeconds or profile.loopGapSeconds or 0.05,
+    syncToleranceSeconds = audio.syncToleranceSeconds or profile.syncToleranceSeconds or 0.08,
+    syncSkipLate = audio.syncSkipLate ~= false and profile.syncSkipLate ~= false,
   }
 end
 
@@ -2141,7 +2261,107 @@ function announcementAudioConfig()
     tailSeconds = audio.tailSeconds or announcements.tailSeconds or 0.5,
     maxChunksPerFeed = audio.maxChunksPerFeed or announcements.maxChunksPerFeed or 8,
     prebufferSeconds = audio.prebufferSeconds or announcements.prebufferSeconds or 2.5,
+    syncLeadSeconds = audio.syncLeadSeconds or announcements.syncLeadSeconds or 1.5,
+    syncToleranceSeconds = audio.syncToleranceSeconds or announcements.syncToleranceSeconds or 0.08,
+    syncSkipLate = audio.syncSkipLate ~= false and announcements.syncSkipLate ~= false,
   }
+end
+
+function scheduledAnnouncementStartMillis(announcement)
+  return notificationScheduledStartMillis(announcement)
+end
+
+function trimPcmStart(pcm, sampleOffset)
+  sampleOffset = math.floor(tonumber(sampleOffset) or 0)
+  if sampleOffset <= 0 then
+    return pcm
+  end
+  if type(pcm) ~= "table" or sampleOffset >= #pcm then
+    return nil
+  end
+
+  local trimmed = {}
+  for index = sampleOffset + 1, #pcm do
+    trimmed[#trimmed + 1] = pcm[index]
+  end
+  return trimmed
+end
+
+function alignAnnouncementPcmToSchedule(pcm, startAt, audioConfig)
+  startAt = tonumber(startAt)
+  if not startAt then
+    return pcm
+  end
+
+  local delaySeconds = alarmDelayUntilMillis(startAt)
+  if delaySeconds > 0 then
+    sleep(delaySeconds)
+    return pcm
+  end
+
+  local toleranceSeconds = tonumber(audioConfig and audioConfig.syncToleranceSeconds) or 0.08
+  local lateSeconds = (nowMillis() - startAt) / 1000
+  if lateSeconds <= math.max(0, toleranceSeconds) then
+    return pcm
+  end
+  if audioConfig and audioConfig.syncSkipLate == false then
+    return pcm
+  end
+
+  local sampleRate = tonumber(audioConfig and audioConfig.sampleRate) or 48000
+  if sampleRate <= 0 then
+    sampleRate = 48000
+  end
+  return trimPcmStart(pcm, math.floor((lateSeconds * sampleRate) + 0.5))
+end
+
+function alignAlarmPcmToSchedule(profile, pcm)
+  local startAt = tonumber(state.alarm and state.alarm.soundStartAt)
+  if not startAt then
+    return pcm
+  end
+
+  local delaySeconds = alarmDelayUntilMillis(startAt)
+  if delaySeconds > 0 then
+    sleep(delaySeconds)
+    return pcm
+  end
+
+  local audioConfig = alarmAudioConfig(profile)
+  if audioConfig.syncSkipLate == false then
+    return pcm
+  end
+
+  local lateSeconds = (nowMillis() - startAt) / 1000
+  local toleranceSeconds = tonumber(audioConfig.syncToleranceSeconds) or 0.08
+  if lateSeconds <= math.max(0, toleranceSeconds) then
+    return pcm
+  end
+
+  local sampleRate = tonumber(audioConfig.sampleRate) or 48000
+  if sampleRate <= 0 then
+    sampleRate = 48000
+  end
+  local durationSeconds = type(pcm) == "table" and #pcm / sampleRate or 0
+  if durationSeconds <= 0 then
+    return pcm
+  end
+
+  local loopSeconds = durationSeconds + alarmLoopGap(profile)
+  if loopSeconds <= 0 then
+    return pcm
+  end
+  local phaseSeconds = lateSeconds % loopSeconds
+  if phaseSeconds >= durationSeconds then
+    sleep(math.max(0, loopSeconds - phaseSeconds))
+    return pcm
+  end
+  local sampleOffset = math.floor((phaseSeconds * sampleRate) + 0.5)
+  if type(pcm) == "table" and sampleOffset >= #pcm then
+    sleep(math.max(0, durationSeconds - phaseSeconds))
+    return pcm
+  end
+  return trimPcmStart(pcm, sampleOffset)
 end
 
 function announcementPlaybackChunkSize()
@@ -2369,6 +2589,14 @@ function playFacilityAnnouncement(announcement)
   if not (type(pcm) == "table" and #pcm > 0) then
     return false
   end
+  local audioConfig = announcementAudioConfig()
+  pcm = alignAnnouncementPcmToSchedule(pcm, scheduledAnnouncementStartMillis(announcement), audioConfig)
+  if not (type(pcm) == "table" and #pcm > 0) then
+    return false
+  end
+  if alarmAnnouncementSuppressionActive() and not allowDuringAlarm then
+    return false
+  end
   clearAnnouncementAudioStreams()
   local volume = tonumber(announcements.volume) or 1
   local played = false
@@ -2459,6 +2687,9 @@ function playAlarmPulse()
   end
 
   local audioBuffer = buildAlarmSoundBuffer(profile, sound)
+  if audioBuffer then
+    audioBuffer = alignAlarmPcmToSchedule(profile, audioBuffer)
+  end
   local dsp = profile.dsp or {}
   local audioVolume = type(sound) == "table" and sound.volume or nil
   audioVolume = tonumber(audioVolume) or tonumber(profile.volume) or tonumber(dsp.volume) or 1
@@ -3825,6 +4056,7 @@ function sendRednet(target, message)
   if not rednet then
     return false, "rednet unavailable"
   end
+  stampOutboundRednetMessage(message)
   return secureRednet.send(rednet, target, message, config and config.rednet or {}, rednetProtocol())
 end
 
@@ -3832,6 +4064,7 @@ function broadcastRednet(message)
   if not rednet then
     return false, "rednet unavailable"
   end
+  stampOutboundRednetMessage(message)
   return secureRednet.broadcast(rednet, message, config and config.rednet or {}, rednetProtocol())
 end
 
@@ -4555,6 +4788,7 @@ function statusSnapshot()
     site = config.siteName,
     facilityName = (displayBranding()).facilityName,
     branding = publicBrandPayload(),
+    serverTimeMillis = nowMillis(),
     alarm = {
       active = state.alarm.active,
       reason = state.alarm.reason,
@@ -7014,11 +7248,16 @@ function kioskApplyNotification(notification, sender, envelope)
   if sender then
     state.kiosk.serverId = sender
   end
+  normalizeNotificationTimingFromServer(notification, envelope, sender)
 
   local item = kioskNotifications.push(state.kiosk, notification, config.notifications and config.notifications.maxItems)
   if item then
     if item.alarm and (item.kind == "alarm" or item.kind == "emergency") then
-      kioskApplyAlarmMessage({ alarm = item.alarm }, sender)
+      kioskApplyAlarmMessage({
+        alarm = item.alarm,
+        serverTimeMillis = envelope and envelope.serverTimeMillis,
+        sentAtMillis = envelope and envelope.sentAtMillis,
+      }, sender)
       if notificationUsesAnnouncementAudio(item) then
         playFacilityAnnouncement(item)
       end
@@ -7036,6 +7275,11 @@ function kioskApplyAlarmMessage(message, sender)
     return
   end
 
+  if sender then
+    state.kiosk.serverId = sender
+  end
+  updateKioskClockOffset(message, sender)
+
   if message.branding then
     state.kiosk.branding = message.branding
   end
@@ -7048,13 +7292,14 @@ function kioskApplyAlarmMessage(message, sender)
     local wasActive = state.alarm.active
     local oldProfile = state.alarm.profile
     local oldStartAt = tonumber(state.alarm.soundStartAt)
-    local newStartAt = tonumber(alarm.soundStartAt)
+    local newStartAt = serverMillisToLocalMillis(alarm.soundStartAt)
+    local newSinceMillis = serverMillisToLocalMillis(alarm.sinceMillis)
     state.alarm.active = alarm.active and true or false
     state.alarm.reason = alarm.reason
     state.alarm.actor = alarm.actor
     state.alarm.door = alarm.door
     state.alarm.profile = alarm.profile
-    state.alarm.sinceMillis = alarm.sinceMillis
+    state.alarm.sinceMillis = newSinceMillis or alarm.sinceMillis
     if state.alarm.active then
       state.alarm.soundStartAt = newStartAt or nowMillis()
     else
@@ -7077,9 +7322,6 @@ function kioskApplyAlarmMessage(message, sender)
     state.lockdown = message.status.lockdown and true or false
   end
 
-  if sender then
-    state.kiosk.serverId = sender
-  end
   state.kiosk.lastSync = os.clock()
   markDirty()
 end
