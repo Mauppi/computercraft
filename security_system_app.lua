@@ -915,6 +915,126 @@ function normalizeEndpoint(endpoint)
   return endpoint
 end
 
+function normalizeRedstoneSide(side, fallback)
+  local value = string.lower(tostring(side or fallback or "back"))
+  local aliases = {
+    up = "top",
+    down = "bottom",
+    north = "front",
+    south = "back",
+    east = "right",
+    west = "left",
+  }
+  return aliases[value] or value
+end
+
+function endpointSide(endpoint, fallback)
+  if type(endpoint) ~= "table" then
+    return normalizeRedstoneSide(nil, fallback)
+  end
+  return normalizeRedstoneSide(endpoint.side or endpoint.outputSide or endpoint.redstoneSide or endpoint.relaySide or endpoint.face, fallback)
+end
+
+function endpointPeripheralName(endpoint)
+  if type(endpoint) ~= "table" then
+    return nil
+  end
+  return endpoint.peripheral or endpoint.relay or endpoint.redstoneRelay or endpoint.integrator or endpoint.device
+end
+
+function wrapEndpointPeripheral(name)
+  local target = tostring(name or "")
+  if target == "" then
+    return nil, nil
+  end
+
+  local device = peripheral.wrap(target)
+  if device then
+    return device, target
+  end
+
+  local wanted = string.lower(target)
+  wanted = string.gsub(wanted, "%s+", "_")
+  if wanted == "relay" or wanted == "redstonerelay" then
+    wanted = "redstone_relay"
+  elseif wanted == "integrator" or wanted == "redstoneintegrator" then
+    wanted = "redstone_integrator"
+  end
+
+  for _, name in ipairs(peripheral.getNames()) do
+    if string.lower(tostring(name)) == wanted or hasPeripheralType(name, wanted) then
+      device = peripheral.wrap(name)
+      if device then
+        return device, name
+      end
+    end
+  end
+
+  return nil, nil
+end
+
+function endpointAnalogLevel(endpoint)
+  if type(endpoint) ~= "table" then
+    return 15
+  end
+  return tonumber(endpoint.level or endpoint.analogLevel or endpoint.strength or endpoint.power or endpoint.threshold) or 15
+end
+
+function endpointPulseSeconds(endpoint)
+  if type(endpoint) ~= "table" then
+    return nil
+  end
+  local value = endpoint.pulseSeconds or endpoint.pulseLength or endpoint.pulse
+  if value == true then
+    return 0.1
+  end
+  value = tonumber(value)
+  if value and value > 0 then
+    return math.max(0.05, math.min(2, value))
+  end
+  return nil
+end
+
+function callOutputMethod(device, methodName, side, value)
+  if not (device and device[methodName]) then
+    return false, "missing method " .. tostring(methodName)
+  end
+  local ok, err = pcall(device[methodName], side, value)
+  if ok then
+    return true
+  end
+  return false, err
+end
+
+function writePeripheralOutput(device, side, value, level, analogPreferred)
+  local ok, err
+  if analogPreferred then
+    ok, err = callOutputMethod(device, "setAnalogOutput", side, value and level or 0)
+    if ok then
+      return true
+    end
+    ok, err = callOutputMethod(device, "setAnalogueOutput", side, value and level or 0)
+    if ok then
+      return true
+    end
+  end
+
+  ok, err = callOutputMethod(device, "setOutput", side, value and true or false)
+  if ok then
+    return true
+  end
+
+  ok, err = callOutputMethod(device, "setAnalogOutput", side, value and level or 0)
+  if ok then
+    return true
+  end
+  ok, err = callOutputMethod(device, "setAnalogueOutput", side, value and level or 0)
+  if ok then
+    return true
+  end
+  return false, err or "peripheral cannot output redstone"
+end
+
 function setEndpoint(endpoint, active)
   endpoint = normalizeEndpoint(endpoint)
   if type(endpoint) ~= "table" then
@@ -929,35 +1049,39 @@ function setEndpoint(endpoint, active)
     value = not value
   end
 
-  local side = endpoint.side or "back"
-  local level = endpoint.level or endpoint.analogLevel or 15
+  local side = endpointSide(endpoint, "back")
+  local level = endpointAnalogLevel(endpoint)
+  local pulseSeconds = endpointPulseSeconds(endpoint)
 
-  if endpoint.peripheral then
-    local device = peripheral.wrap(endpoint.peripheral)
+  local peripheralName = endpointPeripheralName(endpoint)
+  if peripheralName then
+    local device, resolvedName = wrapEndpointPeripheral(peripheralName)
     if not device then
-      return false, "missing peripheral " .. tostring(endpoint.peripheral)
+      return false, "missing peripheral " .. tostring(peripheralName)
     end
 
-    if endpoint.analog or endpoint.level or endpoint.analogLevel then
-      if device.setAnalogOutput then
-        local ok, err = pcall(device.setAnalogOutput, side, value and level or 0)
-        return ok, err
+    if pulseSeconds and value then
+      local offOk, offErr = writePeripheralOutput(device, side, false, level, endpoint.analog or endpoint.level or endpoint.analogLevel or endpoint.strength)
+      if not offOk then
+        return false, offErr
       end
+      sleep(pulseSeconds)
     end
-
-    if device.setOutput then
-      local ok, err = pcall(device.setOutput, side, value)
-      return ok, err
+    local ok, err = writePeripheralOutput(device, side, value, level, endpoint.analog or endpoint.level or endpoint.analogLevel or endpoint.strength)
+    if not ok then
+      return false, tostring(err or "peripheral cannot output redstone") .. " on " .. tostring(resolvedName or peripheralName) .. ":" .. tostring(side)
     end
-
-    if device.setAnalogOutput then
-      local ok, err = pcall(device.setAnalogOutput, side, value and level or 0)
-      return ok, err
-    end
-
-    return false, "peripheral cannot output redstone"
+    return true
   end
 
+  if pulseSeconds and value then
+    if endpoint.analog or endpoint.level or endpoint.analogLevel then
+      redstone.setAnalogOutput(side, 0)
+    else
+      redstone.setOutput(side, false)
+    end
+    sleep(pulseSeconds)
+  end
   if endpoint.analog or endpoint.level or endpoint.analogLevel then
     redstone.setAnalogOutput(side, value and level or 0)
   else
@@ -976,13 +1100,14 @@ function readEndpoint(endpoint)
     return remoteReadEndpoint(endpoint)
   end
 
-  local side = endpoint.side or "back"
+  local side = endpointSide(endpoint, "back")
   local threshold = endpoint.threshold or 1
   local active
   local raw
 
-  if endpoint.peripheral then
-    local device = peripheral.wrap(endpoint.peripheral)
+  local peripheralName = endpointPeripheralName(endpoint)
+  if peripheralName then
+    local device = wrapEndpointPeripheral(peripheralName)
     if not device then
       return false, nil
     end
@@ -990,6 +1115,10 @@ function readEndpoint(endpoint)
     if endpoint.analog or endpoint.threshold then
       if device.getAnalogInput then
         local ok, value = pcall(device.getAnalogInput, side)
+        raw = ok and value or 0
+        active = raw >= threshold
+      elseif device.getAnalogueInput then
+        local ok, value = pcall(device.getAnalogueInput, side)
         raw = ok and value or 0
         active = raw >= threshold
       elseif device.getInput then
@@ -1003,6 +1132,10 @@ function readEndpoint(endpoint)
       active = raw and true or false
     elseif device.getAnalogInput then
       local ok, value = pcall(device.getAnalogInput, side)
+      raw = ok and value or 0
+      active = raw >= threshold
+    elseif device.getAnalogueInput then
+      local ok, value = pcall(device.getAnalogueInput, side)
       raw = ok and value or 0
       active = raw >= threshold
     end
@@ -7150,10 +7283,11 @@ function promptNumber(label, defaultValue)
   return tonumber(value) or defaultValue
 end
 
-function promptEndpoint(label, defaultSide, controller)
+function promptEndpoint(label, defaultSide, controller, options)
+  options = options or {}
   print(label)
   local side = promptLine("  Redstone side", defaultSide or "back")
-  local peripheralName = promptLine("  Redstone integrator/peripheral blank=computer side", "")
+  local peripheralName = promptLine("  Redstone relay/integrator/peripheral blank=computer side", "")
   local analog = promptBool("  Analog endpoint", false)
   local endpoint = {
     side = side or defaultSide or "back",
@@ -7164,6 +7298,9 @@ function promptEndpoint(label, defaultSide, controller)
   if analog then
     endpoint.analog = true
     endpoint.threshold = promptNumber("  Analog threshold", 1)
+  end
+  if options.output and promptBool("  Pulse/momentary output", false) then
+    endpoint.pulseSeconds = promptNumber("  Pulse seconds", 0.1)
   end
   if controller and controller ~= "" and controller ~= "server" and controller ~= "local" then
     endpoint.controller = controller
@@ -7193,7 +7330,7 @@ function setupConsoleAddDoor()
     id = promptLine("Door id", nil),
     label = promptLine("Door label", nil),
     controller = controller,
-    output = promptEndpoint("Door lock/output endpoint", config.setup.defaultDoorSide or "front", controller),
+    output = promptEndpoint("Door lock/output endpoint", config.setup.defaultDoorSide or "front", controller, { output = true }),
     activeOpen = promptBool("Output active opens door", true),
     openSeconds = promptNumber("Open seconds", config.defaultOpenSeconds or 4),
     alarmOnDenied = promptBool("Alarm after denied attempts", true),
@@ -8628,10 +8765,11 @@ function kioskPromptNumber(label, defaultValue)
   return tonumber(value) or defaultValue
 end
 
-function kioskEndpointPrompt(label, defaultSide, controller)
+function kioskEndpointPrompt(label, defaultSide, controller, options)
+  options = options or {}
   print(label)
   local side = kioskPromptLine("  Side", defaultSide or "back")
-  local peripheralName = kioskPromptLine("  Peripheral blank=computer side", "")
+  local peripheralName = kioskPromptLine("  Redstone relay/peripheral blank=computer side", "")
   local analog = kioskPromptBool("  Analog", false)
   local endpoint = { side = side or defaultSide or "back" }
   if peripheralName and peripheralName ~= "" then
@@ -8640,6 +8778,9 @@ function kioskEndpointPrompt(label, defaultSide, controller)
   if analog then
     endpoint.analog = true
     endpoint.threshold = kioskPromptNumber("  Threshold", 1)
+  end
+  if options.output and kioskPromptBool("  Pulse/momentary output", false) then
+    endpoint.pulseSeconds = kioskPromptNumber("  Pulse seconds", 0.1)
   end
   if controller and controller ~= "" and controller ~= "server" and controller ~= "local" then
     endpoint.controller = controller
@@ -8673,7 +8814,7 @@ function kioskSetupAddDoor(serverId, token)
     id = kioskPromptLine("Door id", nil),
     label = kioskPromptLine("Door label", nil),
     controller = controller,
-    output = kioskEndpointPrompt("Output endpoint", "front", controller),
+    output = kioskEndpointPrompt("Output endpoint", "front", controller, { output = true }),
     activeOpen = kioskPromptBool("Output active opens door", true),
     openSeconds = kioskPromptNumber("Open seconds", config.defaultOpenSeconds or 4),
     alarmOnDenied = kioskPromptBool("Alarm on denied attempts", true),
