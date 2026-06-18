@@ -360,8 +360,8 @@ return {
     },
     actions = {
       ACCESS_GRANTED = {
+        enabled = false,
         title = "Door Access",
-        voiceLine = "door_access",
         cooldownSeconds = 4,
         chance = 0.35,
         variations = {
@@ -371,8 +371,8 @@ return {
         },
       },
       ACCESS_DENIED = {
+        enabled = false,
         title = "Door Access Denied",
-        voiceLine = "door_denied",
         cooldownSeconds = 4,
         variations = {
           "Access denied for {actor} at {doorLabel}. Area: {area}.",
@@ -381,8 +381,8 @@ return {
         },
       },
       DOOR_LOCK = {
+        enabled = false,
         title = "Door Secured",
-        voiceLine = "door_secured",
         cooldownSeconds = 8,
         chance = 0.35,
         variations = {
