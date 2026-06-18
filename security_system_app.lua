@@ -378,7 +378,7 @@ function installKioskConfigIfMissing()
   handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
   handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.1, tailSeconds = 0.5, maxChunksPerFeed = 2, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.05, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
@@ -2139,7 +2139,8 @@ function announcementAudioConfig()
     streamGraceSeconds = audio.streamGraceSeconds or announcements.streamGraceSeconds or 30,
     watchdogSeconds = audio.watchdogSeconds or announcements.watchdogSeconds or 0.1,
     tailSeconds = audio.tailSeconds or announcements.tailSeconds or 0.5,
-    maxChunksPerFeed = audio.maxChunksPerFeed or announcements.maxChunksPerFeed or 2,
+    maxChunksPerFeed = audio.maxChunksPerFeed or announcements.maxChunksPerFeed or 8,
+    prebufferSeconds = audio.prebufferSeconds or announcements.prebufferSeconds or 2.5,
   }
 end
 
@@ -2205,9 +2206,6 @@ function announcementFeedSpeakerStream(speakerName)
     clearAnnouncementAudioStreams(true)
     return false
   end
-  if stream.allowDuringAlarm and alarmAudioBusy() then
-    clearAlarmAudioStreams(true)
-  end
   if stream.generation ~= state.announcements.audioGeneration then
     state.announcements.audioStreams[speakerName] = nil
     return false
@@ -2228,7 +2226,16 @@ function announcementFeedSpeakerStream(speakerName)
 
   local fedChunks = 0
   local maxChunks = math.max(1, tonumber(stream.maxChunksPerFeed) or 2)
+  local prebufferSeconds = tonumber(stream.prebufferSeconds) or 2.5
+  if prebufferSeconds < 0.25 then
+    prebufferSeconds = 0.25
+  end
+  local targetQueuedUntil = os.clock() + prebufferSeconds
   while stream.nextIndex <= #stream.pcm and fedChunks < maxChunks do
+    if fedChunks > 0 and stream.queuedUntil and stream.queuedUntil >= targetQueuedUntil then
+      break
+    end
+
     local chunk = {}
     local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
     for index = stream.nextIndex, last do
@@ -2315,7 +2322,8 @@ function startAnnouncementAudioStream(speakerName, speaker, pcm, volume, options
     deadline = os.clock() + duration + (tonumber(audioConfig.streamGraceSeconds) or 30),
     graceSeconds = tonumber(audioConfig.streamGraceSeconds) or 30,
     tailSeconds = tonumber(audioConfig.tailSeconds) or 0.5,
-    maxChunksPerFeed = tonumber(audioConfig.maxChunksPerFeed) or 2,
+    maxChunksPerFeed = tonumber(audioConfig.maxChunksPerFeed) or 8,
+    prebufferSeconds = tonumber(audioConfig.prebufferSeconds) or 2.5,
     allowDuringAlarm = options.allowDuringAlarm and true or false,
   }
 
@@ -7053,11 +7061,11 @@ function kioskApplyAlarmMessage(message, sender)
       state.alarm.soundStartAt = nil
     end
     if not state.alarm.active then
-      clearAlarmAudioStreams(true)
+      clearAlarmAudioStreams(not announcementAudioBusy())
       state.kiosk.lastAlarmSound = 0
       state.alarm.soundIndex = 1
     elseif (not wasActive) or oldProfile ~= state.alarm.profile or oldStartAt ~= tonumber(state.alarm.soundStartAt) then
-      clearAlarmAudioStreams(true)
+      clearAlarmAudioStreams(not announcementAudioBusy())
       state.kiosk.lastAlarmSound = 0
       state.alarm.soundIndex = 1
     end
@@ -7259,7 +7267,14 @@ end
 
 function kioskAlarmSpeakerLoop()
   while state.kiosk.running do
-    local sleepSeconds = 0.1
+    local audioConfig = announcementAudioConfig()
+    local pumpSeconds = tonumber(audioConfig.watchdogSeconds) or 0.05
+    if pumpSeconds < 0.02 then
+      pumpSeconds = 0.02
+    elseif pumpSeconds > 0.2 then
+      pumpSeconds = 0.2
+    end
+    local sleepSeconds = pumpSeconds
     if state.alarm.active then
       local interval = tonumber(config.kiosk and config.kiosk.alarmSoundSeconds) or alarmProfile(state.alarm.profile).repeatSeconds or 1.5
       if alarmWaitingForStart() then
@@ -7272,9 +7287,10 @@ function kioskAlarmSpeakerLoop()
     else
       state.kiosk.lastAlarmSound = 0
       if (tonumber(state.alarm.audioPlayingUntil) or 0) > 0 or next(state.alarm.audioStreams or {}) ~= nil then
-        clearAlarmAudioStreams(true)
+        clearAlarmAudioStreams(not announcementAudioBusy())
       end
     end
+    feedAnnouncementAudioStreams()
     sleep(sleepSeconds)
   end
 end

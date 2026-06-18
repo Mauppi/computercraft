@@ -77,9 +77,10 @@ return {
     maxSamples = 128000,
     chunkSamples = 24000,
     streamGraceSeconds = 30,
-    watchdogSeconds = 0.1,
+    watchdogSeconds = 0.05,
     tailSeconds = 0.5,
-    maxChunksPerFeed = 2,
+    maxChunksPerFeed = 8,
+    prebufferSeconds = 2.5,
     serverPlayback = true,
     alarmAnnouncements = true,
     syncAssets = true,
@@ -253,6 +254,74 @@ return {
     devices = {
       -- monitor_0 = { view = "cycle", views = { "overview", "security", "posters" }, theme = "blue" },
       -- ["*"] = { view = "posters", textScale = 1, theme = "red" },
+    },
+  },
+
+    alarm = {
+    repeatSeconds = 1.25,
+    syncLeadSeconds = 1.5,
+    deniedBeforeAlarm = 3,
+    chat = true,
+    sampleRate = 48000,
+    maxSamples = 128000,
+    audio = {
+      chunkSamples = 128000,
+      loopGapSeconds = 0.05,
+    },
+    syncAssets = true,
+    assetsRequired = true,
+    assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
+
+    -- Speakers are discovered automatically. WAV/PCM entries loop through
+    -- speaker.playAudio before generated DSP fallback is used.
+    sounds = {
+      -- { wav = "announcements/red_alert.wav", volume = 1.2 },
+      { files = { "announcements/red_alert_a.wav", "announcements/red_alert_a.wav", "announcements/red_alert_a.wav", "announcements/red_alert_b.wav", "announcements/red_alert_b.wav", "announcements/red_alert_b.wav" }, volume = 1.2 },
+      -- { pcm = { 0, 28, 56, 28, 0, -28, -56, -28 }, volume = 1.0 },
+      -- { name = "minecraft:block.note_block.pling", volume = 3, pitch = 0.6 },
+      -- { name = "minecraft:block.note_block.bell", volume = 3, pitch = 1.8 },
+    },
+
+    -- Uses speaker.playAudio when available. Existing Minecraft sounds remain
+    -- as a fallback for older/simple speaker setups.
+    dsp = {
+      enabled = true,
+      volume = 1.2,
+      sampleRate = 48000,
+      duration = 0.35,
+      -- Omit patterns to use the built-in low/dissonant alarm profiles.
+      -- Override patterns.security/power_fault/facility_fault/emergency here if desired.
+    },
+
+    -- Sirens, lamps, Create contraptions, or redstone integrators can be driven here.
+    outputs = {
+      { side = "top" },
+      -- { peripheral = "redstoneIntegrator_0", side = "back" },
+    },
+
+    profiles = {
+      security = {
+        label = "Security Alarm",
+      },
+      power_fault = {
+        label = "Power Fault",
+        sounds = {
+        },
+        outputs = {
+          { side = "top" },
+        },
+      },
+      facility_fault = {
+        label = "Facility Fault",
+        sounds = {
+        },
+      },
+      emergency = {
+        label = "Emergency Alarm",
+        repeatSeconds = 7.1,
+        sounds = {
+        },
+      },
     },
   },
 }

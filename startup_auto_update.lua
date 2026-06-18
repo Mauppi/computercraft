@@ -13,6 +13,7 @@ local NOTIFICATIONS_MODULE_FILE = "security_system_notifications.lua"
 local ANNOUNCEMENTS_MODULE_FILE = "security_system_announcements.lua"
 local CONFIG_FILE = "security_config.lua"
 local KIOSK_CONFIG_EXAMPLE = "security_kiosk_config.example.lua"
+local LOCAL_DATA_FILE = "security_local_data.lua"
 local INSTALL_SUBDIR = "security_system"
 local MIN_DISK_INSTALL_FREE = 384000
 local INSTALL_ROOT = ""
@@ -74,7 +75,7 @@ local FALLBACK_MANIFEST = {
       path = APP_MODULE_FILE,
       required = true,
       minSize = 2000,
-      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "DEFAULT_CONFIG_URL", "installRemoteConfigIfMissing", "installKioskConfigIfMissing", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "readerKindFor", "printReaderSourceHints", "kioskSetupReaderHints", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "alarmAudioStreamLoop", "speaker_audio_empty", "alarmSyncLeadMillis", "soundStartAt", "configuredAnnouncement", "configuredAnnouncementHasAudio", "alarmAnnouncementSuppressionActive", "announcementCanPlayDuringAlarm", "broadcastActionAnnouncement", "notificationUsesAnnouncementAudio", "announcementIsAlarmLike", "playFacilityAnnouncement", "pruneAnnouncementAudioStreams", "feedAnnouncementAudioStreams", "handleAnnouncementSpeakerAudioEmpty", "includeAlarm", "function main()", "return {" },
+      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "DEFAULT_CONFIG_URL", "installRemoteConfigIfMissing", "installKioskConfigIfMissing", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "readerKindFor", "printReaderSourceHints", "kioskSetupReaderHints", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "alarmAudioStreamLoop", "speaker_audio_empty", "alarmSyncLeadMillis", "soundStartAt", "configuredAnnouncement", "configuredAnnouncementHasAudio", "alarmAnnouncementSuppressionActive", "announcementCanPlayDuringAlarm", "prebufferSeconds", "broadcastActionAnnouncement", "notificationUsesAnnouncementAudio", "announcementIsAlarmLike", "playFacilityAnnouncement", "pruneAnnouncementAudioStreams", "feedAnnouncementAudioStreams", "handleAnnouncementSpeakerAudioEmpty", "includeAlarm", "function main()", "return {" },
     },
     {
       path = PROGRAM,
@@ -183,6 +184,10 @@ end
 
 local function configPath()
   return CONFIG_FILE
+end
+
+local function localDataPath()
+  return LOCAL_DATA_FILE
 end
 
 local function ensureDir(path)
@@ -426,7 +431,7 @@ local function writeFallbackKioskConfig()
     "  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },",
     "  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },",
     "  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },",
-    "  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.1, tailSeconds = 0.5, maxChunksPerFeed = 2, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },",
+    "  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.05, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },",
     "  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },",
     "}",
   }
@@ -580,6 +585,200 @@ local function loadReturnedTable(source, label)
   return value
 end
 
+local function copyValue(value)
+  if type(value) ~= "table" then
+    return value
+  end
+  local out = {}
+  for key, child in pairs(value) do
+    out[key] = copyValue(child)
+  end
+  return out
+end
+
+local function serializeTable(value)
+  if not (textutils and textutils.serialize) then
+    return nil, "textutils.serialize unavailable"
+  end
+  local ok, serialized = pcall(textutils.serialize, value)
+  if ok and type(serialized) == "string" then
+    return serialized
+  end
+  return nil, tostring(serialized or "serialize failed")
+end
+
+local function nestedValue(root, path)
+  local current = root
+  for index = 1, #path do
+    if type(current) ~= "table" then
+      return nil
+    end
+    current = current[path[index]]
+    if current == nil then
+      return nil
+    end
+  end
+  return current
+end
+
+local function setNestedValue(root, path, value)
+  local current = root
+  for index = 1, #path - 1 do
+    local key = path[index]
+    if type(current[key]) ~= "table" then
+      current[key] = {}
+    end
+    current = current[key]
+  end
+  current[path[#path]] = copyValue(value)
+end
+
+local function mergeTableInto(target, source)
+  if type(source) ~= "table" then
+    return target
+  end
+  if type(target) ~= "table" then
+    target = {}
+  end
+  for key, value in pairs(source) do
+    if type(value) == "table" and type(target[key]) == "table" then
+      mergeTableInto(target[key], value)
+    else
+      target[key] = copyValue(value)
+    end
+  end
+  return target
+end
+
+local PRESERVED_CONFIG_KEYS = {
+  "doors",
+  "readers",
+  "credentials",
+  "sensors",
+  "emergencyButtons",
+  "generators",
+}
+
+local PRESERVED_CONFIG_PATHS = {
+  { "kiosk", "controller" },
+  { "monitors", "devices" },
+  { "rednet", "serverId" },
+  { "employees", "accountsFile" },
+  { "employees", "socialFile" },
+}
+
+local function preserveFacilitySetupForMode(mode)
+  local normalized = normalizedMode(mode)
+  return not (normalized == "kiosk" or normalized == "controller" or normalized == "door")
+end
+
+local function isPreservedFacilityKey(key)
+  for _, preservedKey in ipairs(PRESERVED_CONFIG_KEYS) do
+    if key == preservedKey then
+      return true
+    end
+  end
+  return false
+end
+
+local function extractLocalConfigData(configTable, mode)
+  local data = { config = {} }
+  if type(configTable) ~= "table" then
+    return data
+  end
+
+  if preserveFacilitySetupForMode(mode) then
+    for _, key in ipairs(PRESERVED_CONFIG_KEYS) do
+      if configTable[key] ~= nil then
+        data.config[key] = copyValue(configTable[key])
+      end
+    end
+  end
+
+  for _, path in ipairs(PRESERVED_CONFIG_PATHS) do
+    local value = nestedValue(configTable, path)
+    if value ~= nil then
+      setNestedValue(data.config, path, value)
+    end
+  end
+
+  return data
+end
+
+local function localDataForMode(localData, mode)
+  local out = { config = {} }
+  if not (localData and type(localData.config) == "table") then
+    return out
+  end
+
+  local preserveFacilitySetup = preserveFacilitySetupForMode(mode)
+  for key, value in pairs(localData.config) do
+    if preserveFacilitySetup or not isPreservedFacilityKey(key) then
+      out.config[key] = copyValue(value)
+    end
+  end
+  return out
+end
+
+local function loadLocalDataFile()
+  local data = readFile(localDataPath(), false)
+  if not data then
+    return { config = {} }
+  end
+  local loaded = loadReturnedTable(data, "@" .. localDataPath())
+  if type(loaded) == "table" then
+    loaded.config = type(loaded.config) == "table" and loaded.config or {}
+    return loaded
+  end
+  return { config = {} }
+end
+
+local function writeLocalDataFile(localData)
+  local serialized, serializeErr = serializeTable(localData or { config = {} })
+  if not serialized then
+    return false, serializeErr
+  end
+  local body = "-- Computer-local facility data preserved by startup_auto_update.lua.\n"
+    .. "-- GitHub config remains the base; these sections are merged back after each update.\n"
+    .. "return " .. serialized .. "\n"
+  return writeFile(localDataPath(), body, false)
+end
+
+local function collectLocalData(mode)
+  local existing = loadLocalDataFile()
+  local current = extractLocalConfigData(loadConfigTable(), mode)
+  local merged = { config = {} }
+  mergeTableInto(merged.config, existing.config)
+  mergeTableInto(merged.config, current.config)
+  return merged
+end
+
+local function applyLocalDataToConfig(downloadedConfig, localData)
+  local merged = copyValue(downloadedConfig or {})
+  if localData and type(localData.config) == "table" then
+    mergeTableInto(merged, localData.config)
+  end
+  return merged
+end
+
+local function localDataSummary(localData)
+  local names = {}
+  for _, key in ipairs(PRESERVED_CONFIG_KEYS) do
+    if localData and localData.config and localData.config[key] ~= nil then
+      table.insert(names, key)
+    end
+  end
+  for _, path in ipairs(PRESERVED_CONFIG_PATHS) do
+    if localData and localData.config and nestedValue(localData.config, path) ~= nil then
+      table.insert(names, table.concat(path, "."))
+    end
+  end
+  if #names == 0 then
+    return "none"
+  end
+  return table.concat(names, ", ")
+end
+
 local function fetchUrl(url, binary)
   if not http or not http.get then
     return nil, "HTTP API is disabled"
@@ -623,6 +822,21 @@ local function fileUrl(baseUrl, path)
     path = string.sub(path, 2)
   end
   return normalizeBaseUrl(baseUrl) .. path
+end
+
+local function baseName(path)
+  path = normalizePath(path)
+  local name = string.match(path, "([^/]+)$")
+  return name or path
+end
+
+local function protectedLocalStatePath(path)
+  local name = baseName(path)
+  return name == CONFIG_FILE
+    or name == LOCAL_DATA_FILE
+    or name == "security_accounts.lua"
+    or name == "security_social.lua"
+    or name == "security_audit.log"
 end
 
 local function appendManifestEntries(out, entries, optionalDefault)
@@ -857,6 +1071,10 @@ local function updateOneFile(baseUrl, file)
   end
 
   local target = installPath(file.target or path)
+  if protectedLocalStatePath(target) or protectedLocalStatePath(path) then
+    return true, "protected local state", false
+  end
+
   local binary = isBinaryFile(file)
   local body, err = fetchUrl(file.url or fileUrl(baseUrl, path), binary)
   if not body then
@@ -1057,9 +1275,29 @@ local function overwriteConfigFromGithub(mode)
     return false, sourcePath .. ": " .. tostring(validErr), false
   end
 
+  local downloadedConfig, loadErr = loadReturnedTable(body, "@" .. tostring(url))
+  if not downloadedConfig then
+    return false, sourcePath .. ": " .. tostring(loadErr), false
+  end
+
+  local localData = localDataForMode(collectLocalData(mode), mode)
+  local dataOk, dataErr = writeLocalDataFile(localData)
+  if not dataOk then
+    return false, "could not write " .. localDataPath() .. ": " .. tostring(dataErr), false
+  end
+
+  local mergedConfig = applyLocalDataToConfig(downloadedConfig, localData)
+  local serialized, serializeErr = serializeTable(mergedConfig)
+  if not serialized then
+    return false, "could not serialize merged config: " .. tostring(serializeErr), false
+  end
+  local mergedBody = "-- Auto-updated from " .. tostring(sourcePath) .. " by startup_auto_update.lua.\n"
+    .. "-- Local facility data is preserved in " .. localDataPath() .. ".\n"
+    .. "return " .. serialized .. "\n"
+
   local updated = false
   local target = entry.target or configPath()
-  local writeOk, writeMessage, changed = overwriteTextFile(target, body)
+  local writeOk, writeMessage, changed = overwriteTextFile(target, mergedBody)
   if not writeOk then
     return false, "could not write " .. tostring(target) .. ": " .. tostring(writeMessage), false
   end
@@ -1074,7 +1312,7 @@ local function overwriteConfigFromGithub(mode)
     updated = updated or exampleChanged
   end
 
-  local detail = tostring(entry.label or mode or "server") .. " config from " .. sourcePath .. " (" .. tostring(manifestSource) .. ")"
+  local detail = tostring(entry.label or mode or "server") .. " config from " .. sourcePath .. " (" .. tostring(manifestSource) .. "); preserved " .. localDataSummary(localData)
   if updated then
     return true, "updated " .. detail, true
   end
@@ -1097,6 +1335,11 @@ local function selfUpdateFileEntry(manifest)
         "Manifest-driven auto-updating",
         "SELF_UPDATE_FILE",
         "selfUpdateFromGithub",
+        "security_local_data.lua",
+        "applyLocalDataToConfig",
+        "localDataForMode",
+        "localDataSummary",
+        "protectedLocalStatePath",
         "overwriteConfigFromGithub",
         "function main()",
       }
@@ -1113,6 +1356,11 @@ local function selfUpdateFileEntry(manifest)
       "Manifest-driven auto-updating",
       "SELF_UPDATE_FILE",
       "selfUpdateFromGithub",
+      "security_local_data.lua",
+      "applyLocalDataToConfig",
+      "localDataForMode",
+      "localDataSummary",
+      "protectedLocalStatePath",
       "overwriteConfigFromGithub",
       "function main()",
     },
