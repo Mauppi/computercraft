@@ -104,6 +104,10 @@ return {
       { voiceLine = "slopday_cancelled" },
       { voiceLine = "slopday_slop" },
       { voiceLine = "slopday_nonono" },
+      { voiceLine = "slopday_website" },
+      { voiceLine = "slopday_goon" },
+      { voiceLine = "slopday_animals" },
+      { voiceLine = "slopday_sloppingit" },
     },
     eventAnnouncements = true,
     personnelTitles = {
@@ -420,6 +424,10 @@ return {
       slopday_cancelled = { files = { "announcements/slopdaycancelled.wav" } },
       slopday_slop = { files = { "announcements/slopdayslop.wav" } },
       slopday_nonono = { files = { "announcements/slopdaynonono.wav" } },
+      slopday_website = { files = { "announcements/slopdaywebsite.wav" } },
+      slopday_goon = { files = { "announcements/slopdaygoon.wav" } },
+      slopday_animals = { files = { "announcements/slopdayanimals.wav" } },
+      slopday_sloppingit = { files = { "announcements/slopdaysloppingit.wav" } },
     },
     jingles = {
       announcement = {
