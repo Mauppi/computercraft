@@ -60,13 +60,6 @@ return {
     maxFeedItems = 100,
     sessionSeconds = 1800,
     defaultClearance = 1,
-    clearanceLevels = {
-      employee = 1,
-      operator = 2,
-      security = 3,
-      manager = 4,
-      admin = 5,
-    },
     permissions = {
       postFeed = 1,
       sendMessage = 1,
@@ -121,6 +114,8 @@ return {
 
   kiosk = {
     locked = true,
+    area = "",
+    locationArea = "",
     syncSeconds = 2,
     alarmSoundSeconds = 1.5,
     quitClearance = 5,
@@ -211,35 +206,122 @@ return {
     },
     lines = {},
     eventAnnouncements = true,
+    personnelTitles = {
+      admin = { label = "Admin", voiceLine = "personnel_request_admin" },
+      doctor = { label = "Doctor", voiceLine = "personnel_request_doctor" },
+      employee = { label = "Employee", voiceLine = "personnel_request_employee" },
+      engineer = { label = "Engineer", voiceLine = "personnel_request_engineer" },
+      maintenance = { label = "Maintenance", voiceLine = "personnel_request_maintenance" },
+      security = { label = "Security", voiceLine = "personnel_request_security" },
+    },
+    personnelReasons = {
+      engineering = { label = "engineering", voiceLine = "personnel_reason_engineering" },
+      general = { label = "general assistance", voiceLine = "personnel_reason_general" },
+      maintenance = { label = "maintenance", voiceLine = "personnel_reason_maintenance" },
+      medical = { label = "medical assistance", voiceLine = "personnel_reason_medical" },
+      meeting = { label = "meeting", voiceLine = "personnel_reason_meeting" },
+      questioning = { label = "questioning", voiceLine = "personnel_reason_questioning" },
+      security = { label = "security", voiceLine = "personnel_reason_security" },
+    },
     events = {
       alarm = {
         title = "Security Alarm",
-        voiceLine = "alarm",
+        voiceLine = "security_alarm_engaged",
         cooldownSeconds = 2,
         variations = {
-          "Security alarm active. Cause: {reason}.",
-          "Attention. Security response required. {reason}.",
-          "{facility} alarm condition active. Await clearance.",
+          "Security alarm active in {area}. Cause: {reason}.",
+          "Attention. Security response required near {doorLabel}.",
+          "{facility} security alarm condition active. Area: {area}. Await clearance.",
+        },
+      },
+      ["alarm:security"] = {
+        title = "Security Alarm",
+        voiceLine = "security_alarm_engaged",
+        cooldownSeconds = 2,
+        variations = {
+          "Security alarm engaged in {area}. Cause: {reason}.",
+          "Security response requested at {doorLabel}, {area}.",
+          "Unauthorized condition detected in {area}. Security alarm engaged.",
+        },
+      },
+      ["alarm:facility_fault"] = {
+        title = "Facility Fault Alarm",
+        voiceLine = "facility_fault_engaged",
+        cooldownSeconds = 2,
+        variations = {
+          "Facility fault alarm engaged. Area: {area}. Cause: {reason}.",
+          "Maintenance response required in {area}. Facility alarm engaged.",
+          "Fault condition active near {doorLabel}. Await engineering clearance.",
+        },
+      },
+      ["alarm:power_fault"] = {
+        title = "Power Fault Alarm",
+        voiceLine = "power_fault_engaged",
+        cooldownSeconds = 2,
+        variations = {
+          "Power fault alarm engaged. Area: {area}. Cause: {reason}.",
+          "Engineering response required. Power anomaly detected in {area}.",
+          "Create electrical fault condition active. Await maintenance clearance.",
         },
       },
       emergency = {
         title = "Emergency Alarm",
-        voiceLine = "alarm",
+        voiceLine = "emergency_alarm_engaged",
         cooldownSeconds = 2,
         variations = {
-          "Emergency alarm active. Follow facility response procedures.",
-          "Emergency condition declared. Move with purpose and await instruction.",
+          "Emergency alarm active. Area: {area}. Follow facility response procedures.",
+          "Emergency condition declared in {area}. Move with purpose and await instruction.",
           "{facility} emergency response is now active.",
         },
       },
       alarm_reset = {
         title = "Alarm Reset",
-        voiceLine = "alarm_clear",
+        voiceLine = "security_alarm_disengaged",
         cooldownSeconds = 2,
         variations = {
-          "Alarm condition cleared. Resume normal duties.",
-          "Security alarm reset. Continue monitoring your area.",
+          "Alarm condition disengaged in {area}. Resume normal duties.",
+          "Security alarm reset for {doorLabel}. Continue monitoring your area.",
           "{facility} alarm state has returned to clear.",
+        },
+      },
+      ["alarm_reset:security"] = {
+        title = "Security Alarm Reset",
+        voiceLine = "security_alarm_disengaged",
+        cooldownSeconds = 2,
+        variations = {
+          "Security alarm disengaged in {area}.",
+          "Security alarm reset near {doorLabel}. Resume normal duties.",
+          "Area {area} has returned to security clear.",
+        },
+      },
+      ["alarm_reset:facility_fault"] = {
+        title = "Facility Fault Clear",
+        voiceLine = "facility_fault_disengaged",
+        cooldownSeconds = 2,
+        variations = {
+          "Facility fault alarm disengaged in {area}.",
+          "Maintenance fault clear for {area}. Continue monitoring.",
+          "Facility fault state cleared near {doorLabel}.",
+        },
+      },
+      ["alarm_reset:power_fault"] = {
+        title = "Power Fault Clear",
+        voiceLine = "power_fault_disengaged",
+        cooldownSeconds = 2,
+        variations = {
+          "Power fault alarm disengaged. Engineering systems normal.",
+          "Power anomaly cleared in {area}. Continue monitoring generators.",
+          "Create electrical fault state cleared.",
+        },
+      },
+      ["alarm_reset:emergency"] = {
+        title = "Emergency Alarm Reset",
+        voiceLine = "emergency_alarm_disengaged",
+        cooldownSeconds = 2,
+        variations = {
+          "Emergency alarm disengaged in {area}.",
+          "Emergency response cleared. Await supervisor confirmation.",
+          "{facility} emergency state has returned to clear.",
         },
       },
       lockdown = {
@@ -262,8 +344,50 @@ return {
           "Access restrictions cleared. Thank you for your compliance.",
         },
       },
+      personnel_request = {
+        title = "Personnel Request",
+        voiceLines = { "{personnelVoiceLine}", "{personnelNameVoiceLine}", "{personnelReasonVoiceLine}", "{areaVoiceLine}" },
+        cooldownSeconds = 3,
+        variations = {
+          "{personnel} requested in {area} for {personnelReasonLabel}. Title: {personnelTitle}.",
+          "{personnelTitle} personnel request from {requester} for {personnelReasonLabel}. Report to {area}.",
+          "Area {area} requests {personnelTitle} for {personnelReasonLabel}. Respond when available.",
+        },
+      },
     },
     actions = {
+      ACCESS_GRANTED = {
+        title = "Door Access",
+        voiceLine = "door_access",
+        cooldownSeconds = 4,
+        chance = 0.35,
+        variations = {
+          "Door access granted for {actor} at {doorLabel}. Area: {area}.",
+          "{actor} entered {area} through {doorLabel}.",
+          "Access event logged. Personnel {actor}. Area {area}.",
+        },
+      },
+      ACCESS_DENIED = {
+        title = "Door Access Denied",
+        voiceLine = "door_denied",
+        cooldownSeconds = 4,
+        variations = {
+          "Access denied for {actor} at {doorLabel}. Area: {area}.",
+          "Rejected credential at {doorLabel}. Security observe {area}.",
+          "Unauthorized access attempt logged in {area}.",
+        },
+      },
+      DOOR_LOCK = {
+        title = "Door Secured",
+        voiceLine = "door_secured",
+        cooldownSeconds = 8,
+        chance = 0.35,
+        variations = {
+          "{doorLabel} secured. Area: {area}.",
+          "Door state secured in {area}.",
+          "{area} access point locked.",
+        },
+      },
       SENSOR_FAULT = {
         enabled = false,
         title = "Facility Fault",
@@ -315,6 +439,85 @@ return {
       -- alert = { wav = "announcements/alert.wav" },
       -- lockdown = { files = { "announcements/lockdown_1.wav", "announcements/lockdown_2.wav" } },
       -- short = { pcm = { 0, 12, 24, 12, 0, -12, -24, -12 } },
+      attention = { files = { "announcements/vo_attention.wav" } },
+      lockdown = { files = { "announcements/vo_lockdown.wav", "announcements/vo_engaged.wav" } },
+      lockdown_clear = { files = { "announcements/vo_lockdown.wav", "announcements/vo_disengaged.wav" } },
+      alarm = { files = { "announcements/vo_alarm.wav", "announcements/vo_engaged.wav" } },
+      alarm_clear = { files = { "announcements/vo_alarm.wav", "announcements/vo_disengaged.wav" } },
+      security_alarm_engaged = { files = { "announcements/vo_secalarm.wav", "announcements/vo_engaged.wav" } },
+      security_alarm_disengaged = { files = { "announcements/vo_secalarm.wav", "announcements/vo_disengaged.wav" } },
+      emergency_alarm_engaged = { files = { "announcements/vo_attention.wav", "announcements/vo_alarm.wav", "announcements/vo_engaged.wav" } },
+      emergency_alarm_disengaged = { files = { "announcements/vo_attention.wav", "announcements/vo_alarm.wav", "announcements/vo_disengaged.wav" } },
+      facility_fault_engaged = { files = { "announcements/vo_attention.wav", "announcements/vo_alarm.wav", "announcements/vo_engaged.wav" } },
+      facility_fault_disengaged = { files = { "announcements/vo_attention.wav", "announcements/vo_alarm.wav", "announcements/vo_disengaged.wav" } },
+      power_fault_engaged = { files = { "announcements/vo_attention.wav", "announcements/vo_alarm.wav", "announcements/vo_engaged.wav" } },
+      power_fault_disengaged = { files = { "announcements/vo_attention.wav", "announcements/vo_alarm.wav", "announcements/vo_disengaged.wav" } },
+      door_access = { files = { "announcements/vo_attention.wav" } },
+      door_denied = { files = { "announcements/vo_attention.wav" } },
+      door_secured = { files = { "announcements/vo_attention.wav" } },
+      personnel_request = {
+        variations = {
+          { files = { "announcements/vo_yourequested.wav" } },
+          { files = { "announcements/vo_attention.wav", "announcements/vo_yourequested.wav" } },
+        },
+      },
+      personnel_request_admin = {
+        variations = {
+          { files = { "announcements/vo_yourequested.wav", "announcements/vo_admin.wav" } },
+          { files = { "announcements/vo_attention.wav", "announcements/vo_admin.wav" } },
+        },
+      },
+      personnel_request_doctor = {
+        variations = {
+          { files = { "announcements/vo_yourequested.wav", "announcements/vo_doctor.wav" } },
+          { files = { "announcements/vo_attention.wav", "announcements/vo_doctor.wav" } },
+        },
+      },
+      personnel_request_employee = {
+        variations = {
+          { files = { "announcements/vo_yourequested.wav", "announcements/vo_employee.wav" } },
+          { files = { "announcements/vo_attention.wav", "announcements/vo_employee.wav" } },
+        },
+      },
+      personnel_request_engineer = {
+        variations = {
+          { files = { "announcements/vo_yourequested.wav", "announcements/vo_engineer.wav" } },
+          { files = { "announcements/vo_attention.wav", "announcements/vo_engineer.wav" } },
+        },
+      },
+      personnel_request_maintenance = {
+        variations = {
+          { files = { "announcements/vo_yourequested.wav", "announcements/vo_maintenance.wav" } },
+          { files = { "announcements/vo_attention.wav", "announcements/vo_maintenance.wav" } },
+        },
+      },
+      personnel_request_security = {
+        variations = {
+          { files = { "announcements/vo_yourequested.wav", "announcements/vo_security.wav" } },
+          { files = { "announcements/vo_attention.wav", "announcements/vo_security.wav" } },
+        },
+      },
+      person_crafthessu = { files = { "announcements/vo_person_crafthessu.wav" } },
+      person_faceremover = { files = { "announcements/vo_person_faceremover.wav" } },
+      person_lucsaani = { files = { "announcements/vo_person_lucsaani.wav" } },
+      person_mauppi = { files = { "announcements/vo_person_mauppi.wav" } },
+      person_skaahejo = { files = { "announcements/vo_person_skaahejo.wav" } },
+      place_frontentrance = { files = { "announcements/vo_place_frontentrance.wav" } },
+      place_mainshaft = { files = { "announcements/vo_place_mainshaft.wav" } },
+      place_serverroom = { files = { "announcements/vo_place_serverroom.wav" } },
+      word_for = { files = { "announcements/vo_for.wav" } },
+      personnel_reason_engineering = { files = { "announcements/vo_for.wav", "announcements/vo_engineer.wav" } },
+      personnel_reason_general = { files = { "announcements/vo_for.wav", "announcements/vo_personnelrequest_general_reason.wav" } },
+      personnel_reason_maintenance = {
+        variations = {
+          { files = { "announcements/vo_for.wav", "announcements/vo_maintenance.wav" } },
+          { files = { "announcements/vo_for.wav", "announcements/vo_engineer.wav" } },
+        },
+      },
+      personnel_reason_medical = { files = { "announcements/vo_for.wav", "announcements/vo_doctor.wav" } },
+      personnel_reason_meeting = { files = { "announcements/vo_for.wav", "announcements/vo_meeting.wav" } },
+      personnel_reason_questioning = { files = { "announcements/vo_for.wav", "announcements/vo_questioning.wav" } },
+      personnel_reason_security = { files = { "announcements/vo_for.wav", "announcements/vo_security.wav" } },
     },
     jingles = {
       announcement = {

@@ -377,7 +377,7 @@ function installKioskConfigIfMissing()
   handle.writeLine("  mode = \"kiosk\",")
   handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },")
   handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
-  handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },")
+  handle.writeLine("  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
   handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.05, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
@@ -476,17 +476,29 @@ function applyDefaults(userConfig)
       merged.announcements.actions[key] = shallowCopy(value)
     end
   end
+  merged.announcements.voiceLines = merged.announcements.voiceLines or shallowCopy(defaultConfig.announcements.voiceLines or {})
+  for key, value in pairs(defaultConfig.announcements.voiceLines or {}) do
+    if merged.announcements.voiceLines[key] == nil then
+      merged.announcements.voiceLines[key] = shallowCopy(value)
+    end
+  end
+  merged.announcements.personnelTitles = merged.announcements.personnelTitles or shallowCopy(defaultConfig.announcements.personnelTitles or {})
+  for key, value in pairs(defaultConfig.announcements.personnelTitles or {}) do
+    if merged.announcements.personnelTitles[key] == nil then
+      merged.announcements.personnelTitles[key] = shallowCopy(value)
+    end
+  end
+  merged.announcements.personnelReasons = merged.announcements.personnelReasons or shallowCopy(defaultConfig.announcements.personnelReasons or {})
+  for key, value in pairs(defaultConfig.announcements.personnelReasons or {}) do
+    if merged.announcements.personnelReasons[key] == nil then
+      merged.announcements.personnelReasons[key] = shallowCopy(value)
+    end
+  end
 
   merged.employees = merged.employees or shallowCopy(defaultConfig.employees)
   for key, value in pairs(defaultConfig.employees) do
     if merged.employees[key] == nil then
       merged.employees[key] = shallowCopy(value)
-    end
-  end
-  merged.employees.clearanceLevels = merged.employees.clearanceLevels or shallowCopy(defaultConfig.employees.clearanceLevels)
-  for key, value in pairs(defaultConfig.employees.clearanceLevels) do
-    if merged.employees.clearanceLevels[key] == nil then
-      merged.employees.clearanceLevels[key] = value
     end
   end
   merged.employees.permissions = merged.employees.permissions or shallowCopy(defaultConfig.employees.permissions)
@@ -1354,6 +1366,16 @@ function announcementIsAlarmOrEmergencyKind(kind)
   return kind == "alarm" or kind == "emergency"
 end
 
+function announcementKeyIsAlarmOrEmergency(kind)
+  kind = tostring(kind or "")
+  return kind == "alarm"
+    or kind == "emergency"
+    or string.find(kind, "alarm:", 1, true) == 1
+    or string.find(kind, "emergency:", 1, true) == 1
+    or string.find(kind, "event:alarm", 1, true) == 1
+    or string.find(kind, "event:emergency", 1, true) == 1
+end
+
 function alarmAnnouncementSuppressionActive()
   if state.alarm and state.alarm.active then
     return true
@@ -1372,13 +1394,7 @@ function configuredAnnouncementAllowedDuringAlarm(key, fallbackKey, spec)
   if not alarmAnnouncementSuppressionActive() then
     return true
   end
-  if announcementIsAlarmOrEmergencyKind(key) or announcementIsAlarmOrEmergencyKind(fallbackKey) then
-    return true
-  end
-  if type(key) == "string" and (key == "event:alarm" or key == "event:emergency") then
-    return true
-  end
-  if type(fallbackKey) == "string" and (fallbackKey == "event:alarm" or fallbackKey == "event:emergency") then
+  if announcementKeyIsAlarmOrEmergency(key) or announcementKeyIsAlarmOrEmergency(fallbackKey) then
     return true
   end
   if type(spec) == "table" and announcementIsAlarmOrEmergencyKind(spec.kind or spec.type) then
@@ -1460,6 +1476,237 @@ function copyContextFields(context, source)
   end
 end
 
+function announcementKey(value)
+  local text = string.lower(tostring(value or ""))
+  text = string.gsub(text, "%s+", "_")
+  text = string.gsub(text, "[^%w_%-]", "")
+  if text == "" then
+    text = "unknown"
+  end
+  return text
+end
+
+function configuredVoiceLineExists(id)
+  id = tostring(id or "")
+  if id == "" then
+    return false
+  end
+
+  local lines = config and config.announcements and config.announcements.voiceLines or {}
+  return lines[id] ~= nil or lines[tostring(id)] ~= nil
+end
+
+function personnelTitleSpec(roleKey, rawRole)
+  local titles = config and config.announcements and config.announcements.personnelTitles or {}
+  if type(titles) ~= "table" then
+    return nil
+  end
+  return titles[roleKey] or titles[tostring(rawRole or "")]
+end
+
+function personnelTitleLabel(roleKey, rawRole)
+  local spec = personnelTitleSpec(roleKey, rawRole)
+  if type(spec) == "table" then
+    return spec.label or spec.title or spec.name or tostring(rawRole or roleKey or "employee")
+  end
+  if type(spec) == "string" then
+    return spec
+  end
+
+  local labels = {
+    admin = "Admin",
+    doctor = "Doctor",
+    employee = "Employee",
+    engineer = "Engineer",
+    maintenance = "Maintenance",
+    security = "Security",
+  }
+  return labels[roleKey] or tostring(rawRole or roleKey or "employee")
+end
+
+function personnelReasonSpec(reasonKey, rawReason)
+  local reasons = config and config.announcements and config.announcements.personnelReasons or {}
+  if type(reasons) ~= "table" then
+    return nil
+  end
+  return reasons[reasonKey] or reasons[tostring(rawReason or "")]
+end
+
+function personnelReasonLabel(reasonKey, rawReason)
+  local spec = personnelReasonSpec(reasonKey, rawReason)
+  if type(spec) == "table" then
+    return spec.label or spec.title or spec.name or tostring(rawReason or reasonKey or "general assistance")
+  end
+  if type(spec) == "string" and not configuredVoiceLineExists(spec) then
+    return spec
+  end
+
+  local labels = {
+    engineering = "engineering",
+    general = "general assistance",
+    maintenance = "maintenance",
+    medical = "medical assistance",
+    meeting = "meeting",
+    questioning = "questioning",
+    security = "security",
+  }
+  return labels[reasonKey] or tostring(rawReason or reasonKey or "general assistance")
+end
+
+function employeeRecordByName(value)
+  local target = normalizeUsername(value)
+  if target == "" then
+    return nil
+  end
+
+  local direct = employeeRecord(target)
+  if direct then
+    return direct
+  end
+
+  for _, record in pairs(state.accounts and state.accounts.users or {}) do
+    if normalizeUsername(record.displayName or record.username) == target then
+      return record
+    end
+  end
+  return nil
+end
+
+function personnelRoleFromText(value)
+  local key = announcementKey(value)
+  if key == "admin" or key == "administrator" then
+    return "admin"
+  end
+  if key == "doctor" or key == "medic" or key == "medical" then
+    return "doctor"
+  end
+  if key == "engineer" or key == "engineering" then
+    return "engineer"
+  end
+  if key == "maintenance" or key == "mechanic" or key == "technician" then
+    return "maintenance"
+  end
+  if key == "security" or key == "guard" then
+    return "security"
+  end
+  if key == "employee" or key == "staff" or key == "personnel" then
+    return "employee"
+  end
+  return nil
+end
+
+function personnelRequestFields(message, personnel)
+  message = type(message) == "table" and message or {}
+  local record = employeeRecordByName(personnel)
+  local rawRole = message.personnelRole or message.role or message.title or message.personnelTitle
+  rawRole = rawRole or (record and record.role) or personnelRoleFromText(personnel) or "employee"
+
+  local roleKey = announcementKey(rawRole)
+  local spec = personnelTitleSpec(roleKey, rawRole)
+  local voiceLine = type(spec) == "table" and spec.voiceLine or nil
+  if not voiceLine or tostring(voiceLine) == "" then
+    voiceLine = "personnel_request_" .. roleKey
+  end
+  if not configuredVoiceLineExists(voiceLine) then
+    roleKey = "employee"
+    rawRole = "employee"
+    spec = personnelTitleSpec(roleKey, rawRole)
+    voiceLine = type(spec) == "table" and spec.voiceLine or "personnel_request_employee"
+  end
+  if not configuredVoiceLineExists(voiceLine) then
+    voiceLine = "personnel_request"
+  end
+
+  return {
+    personnelRole = rawRole,
+    personnelRoleKey = roleKey,
+    personnelTitle = personnelTitleLabel(roleKey, rawRole),
+    personnelTitleKey = announcementKey(personnelTitleLabel(roleKey, rawRole)),
+    personnelVoiceLine = voiceLine,
+    personnelUsername = record and record.username or nil,
+  }
+end
+
+function configuredVoiceLineOrEmpty(id)
+  id = tostring(id or "")
+  if configuredVoiceLineExists(id) then
+    return id
+  end
+  return ""
+end
+
+function personVoiceLineId(value)
+  local id = "person_" .. announcementKey(value)
+  return configuredVoiceLineOrEmpty(id)
+end
+
+function placeVoiceLineId(value)
+  local id = "place_" .. announcementKey(value)
+  return configuredVoiceLineOrEmpty(id)
+end
+
+function personnelReasonFields(message)
+  message = type(message) == "table" and message or {}
+  local rawReason = firstTextValue(message.personnelReason, message.requestReason, message.paReason, message.reason)
+  if not rawReason or rawReason == "" then
+    rawReason = "general"
+  end
+
+  local reasonKey = announcementKey(rawReason)
+  local spec = personnelReasonSpec(reasonKey, rawReason)
+  local voiceLine = nil
+  if type(spec) == "table" then
+    voiceLine = spec.voiceLine or spec.voice or spec.id
+  elseif type(spec) == "string" and configuredVoiceLineExists(spec) then
+    voiceLine = spec
+  end
+  if not voiceLine or tostring(voiceLine) == "" then
+    voiceLine = "personnel_reason_" .. reasonKey
+  end
+  if not configuredVoiceLineExists(voiceLine) then
+    voiceLine = configuredVoiceLineOrEmpty("personnel_reason_general")
+  end
+
+  return {
+    personnelReason = rawReason,
+    personnelReasonKey = reasonKey,
+    personnelReasonLabel = personnelReasonLabel(reasonKey, rawReason),
+    personnelReasonVoiceLine = voiceLine,
+  }
+end
+
+function doorAnnouncementFields(doorId)
+  local id = tostring(doorId or "")
+  local door = config and config.doors and config.doors[id] or nil
+  local label = id
+  local area = nil
+  if type(door) == "table" then
+    label = door.label or door.name or id
+    area = door.area or door.zone or door.sector or door.location or door.wing
+  end
+  area = area or "unspecified area"
+  return {
+    door = id,
+    doorLabel = label,
+    doorKey = announcementKey(id),
+    area = tostring(area),
+    areaKey = announcementKey(area),
+  }
+end
+
+function applyDoorAnnouncementContext(context, doorId)
+  if not (type(context) == "table" and doorId and tostring(doorId) ~= "") then
+    return
+  end
+
+  local fields = doorAnnouncementFields(doorId)
+  for key, value in pairs(fields) do
+    if context[key] == nil or context[key] == "" then
+      context[key] = value
+    end
+  end
+end
+
 function announcementContextValue(context, key)
   local current = context
   for part in string.gmatch(tostring(key or ""), "[^%.]+") do
@@ -1485,6 +1732,20 @@ function formatAnnouncementTemplate(text, context)
   end))
 end
 
+function formatAnnouncementValue(value, context)
+  if type(value) == "string" or type(value) == "number" then
+    return formatAnnouncementTemplate(value, context)
+  end
+  if type(value) == "table" then
+    local out = {}
+    for key, child in pairs(value) do
+      out[key] = formatAnnouncementValue(child, context)
+    end
+    return out
+  end
+  return value
+end
+
 function eventAnnouncementContext(kind, title, text, severity, extra)
   local context = {
     kind = kind,
@@ -1503,6 +1764,22 @@ function eventAnnouncementContext(kind, title, text, severity, extra)
     context.door = context.door or extra.alarm.door
     context.profile = context.profile or extra.alarm.profile
   end
+  applyDoorAnnouncementContext(context, context.door)
+  context.personnel = context.personnel or context.person or context.actor or context.user
+  context.personnelKey = context.personnelKey or announcementKey(context.personnel)
+  context.personnelRole = context.personnelRole or "employee"
+  context.personnelRoleKey = context.personnelRoleKey or announcementKey(context.personnelRole)
+  context.personnelTitle = context.personnelTitle or personnelTitleLabel(context.personnelRoleKey, context.personnelRole)
+  context.personnelTitleKey = context.personnelTitleKey or announcementKey(context.personnelTitle)
+  context.personnelVoiceLine = context.personnelVoiceLine or "personnel_request_" .. tostring(context.personnelRoleKey)
+  context.personnelNameVoiceLine = context.personnelNameVoiceLine or personVoiceLineId(context.personnel)
+  context.personnelReason = context.personnelReason or context.requestReason or context.paReason or context.reason or "general"
+  context.personnelReasonKey = context.personnelReasonKey or announcementKey(context.personnelReason)
+  context.personnelReasonLabel = context.personnelReasonLabel or personnelReasonLabel(context.personnelReasonKey, context.personnelReason)
+  context.personnelReasonVoiceLine = context.personnelReasonVoiceLine or configuredVoiceLineOrEmpty("personnel_reason_" .. tostring(context.personnelReasonKey))
+  context.areaVoiceLine = context.areaVoiceLine or placeVoiceLineId(context.area)
+  context.requester = context.requester or context.actor or context.user
+  context.requesterKey = context.requesterKey or announcementKey(context.requester)
   return context
 end
 
@@ -1516,6 +1793,22 @@ function actionAnnouncementContext(action, detail)
     shortName = displayBranding().shortName or "SEC",
   }
   copyContextFields(context, detail)
+  applyDoorAnnouncementContext(context, context.door)
+  context.personnel = context.personnel or context.person or context.actor or context.user
+  context.personnelKey = context.personnelKey or announcementKey(context.personnel)
+  context.personnelRole = context.personnelRole or "employee"
+  context.personnelRoleKey = context.personnelRoleKey or announcementKey(context.personnelRole)
+  context.personnelTitle = context.personnelTitle or personnelTitleLabel(context.personnelRoleKey, context.personnelRole)
+  context.personnelTitleKey = context.personnelTitleKey or announcementKey(context.personnelTitle)
+  context.personnelVoiceLine = context.personnelVoiceLine or "personnel_request_" .. tostring(context.personnelRoleKey)
+  context.personnelNameVoiceLine = context.personnelNameVoiceLine or personVoiceLineId(context.personnel)
+  context.personnelReason = context.personnelReason or context.requestReason or context.paReason or context.reason or "general"
+  context.personnelReasonKey = context.personnelReasonKey or announcementKey(context.personnelReason)
+  context.personnelReasonLabel = context.personnelReasonLabel or personnelReasonLabel(context.personnelReasonKey, context.personnelReason)
+  context.personnelReasonVoiceLine = context.personnelReasonVoiceLine or configuredVoiceLineOrEmpty("personnel_reason_" .. tostring(context.personnelReasonKey))
+  context.areaVoiceLine = context.areaVoiceLine or placeVoiceLineId(context.area)
+  context.requester = context.requester or context.actor or context.user
+  context.requesterKey = context.requesterKey or announcementKey(context.requester)
   return context
 end
 
@@ -1602,6 +1895,17 @@ function configuredAnnouncementVoice(spec, variant)
   return chooseAnnouncementValue(value)
 end
 
+function configuredAnnouncementVoiceLines(spec, variant)
+  local value = nil
+  if type(variant) == "table" then
+    value = variant.voiceLines or variant.voiceLineParts or variant.voiceSequence
+  end
+  if value == nil and type(spec) == "table" then
+    value = spec.voiceLines or spec.voiceLineParts or spec.voiceSequence
+  end
+  return value
+end
+
 function configuredAnnouncementAudioField(spec, variant, field)
   if type(variant) == "table" and variant[field] ~= nil then
     return variant[field]
@@ -1616,7 +1920,7 @@ function configuredAnnouncementHasAudio(spec, variant, voiceLine)
   if voiceLine ~= nil and tostring(voiceLine) ~= "" then
     return true
   end
-  local fields = { "wav", "file", "path", "files", "pcm", "samples", "mix", "layers", "overlay", "overlays", "parts", "segments" }
+  local fields = { "voiceLines", "voiceLineParts", "voiceSequence", "wav", "file", "path", "files", "pcm", "samples", "mix", "layers", "overlay", "overlays", "parts", "segments" }
   for _, field in ipairs(fields) do
     local value = configuredAnnouncementAudioField(spec, variant, field)
     if value ~= nil then
@@ -1652,6 +1956,13 @@ function configuredAnnouncement(key, fallbackKey, context)
 
   local text = configuredAnnouncementText(spec, variant)
   local voiceLine = configuredAnnouncementVoice(spec, variant)
+  if type(voiceLine) == "string" then
+    voiceLine = formatAnnouncementTemplate(voiceLine, context)
+  end
+  local voiceLines = configuredAnnouncementVoiceLines(spec, variant)
+  if voiceLines ~= nil then
+    voiceLines = formatAnnouncementValue(voiceLines, context)
+  end
   if announcements.requireVoiceLine and not configuredAnnouncementHasAudio(spec, variant, voiceLine) then
     return nil
   end
@@ -1662,6 +1973,7 @@ function configuredAnnouncement(key, fallbackKey, context)
   local out = {
     text = formatAnnouncementTemplate(text, context),
     voiceLine = voiceLine,
+    voiceLines = voiceLines,
   }
 
   if type(spec) == "table" then
@@ -1679,6 +1991,8 @@ function configuredAnnouncement(key, fallbackKey, context)
     out.overlays = spec.overlays
     out.parts = spec.parts
     out.segments = spec.segments
+    out.voiceLineParts = spec.voiceLineParts
+    out.voiceSequence = spec.voiceSequence
   end
   if type(variant) == "table" then
     out.kind = variant.kind or out.kind
@@ -1717,11 +2031,36 @@ function configuredAnnouncement(key, fallbackKey, context)
     if variant.segments ~= nil then
       out.segments = variant.segments
     end
+    if variant.voiceLineParts ~= nil then
+      out.voiceLineParts = formatAnnouncementValue(variant.voiceLineParts, context)
+    end
+    if variant.voiceSequence ~= nil then
+      out.voiceSequence = formatAnnouncementValue(variant.voiceSequence, context)
+    end
   end
   out.title = out.title and formatAnnouncementTemplate(out.title, context) or nil
   out.severity = out.severity and formatAnnouncementTemplate(out.severity, context) or nil
   markAnnouncementCooldown(key, spec)
   return out
+end
+
+function configuredEventAnnouncement(kind, context)
+  local profile = context and context.profile
+  if profile and tostring(profile) ~= "" then
+    local profileKey = announcementKey(profile)
+    local candidates = {
+      "event:" .. tostring(kind or "") .. ":" .. profileKey,
+      tostring(kind or "") .. ":" .. profileKey,
+    }
+    for _, key in ipairs(candidates) do
+      local configured = configuredAnnouncement(key, nil, context)
+      if configured then
+        return configured
+      end
+    end
+  end
+
+  return configuredAnnouncement("event:" .. tostring(kind or ""), kind, context)
 end
 
 function applyConfiguredAnnouncement(notification, configured)
@@ -1733,6 +2072,15 @@ function applyConfiguredAnnouncement(notification, configured)
   notification.title = configured.title or notification.title
   notification.severity = configured.severity or notification.severity
   notification.voiceLine = configured.voiceLine or notification.voiceLine
+  if configured.voiceLines ~= nil then
+    notification.voiceLines = configured.voiceLines
+  end
+  if configured.voiceLineParts ~= nil then
+    notification.voiceLineParts = configured.voiceLineParts
+  end
+  if configured.voiceSequence ~= nil then
+    notification.voiceSequence = configured.voiceSequence
+  end
   if configured.kind then
     notification.kind = configured.kind
   end
@@ -1796,7 +2144,7 @@ end
 function broadcastEventNotification(kind, title, text, severity, extra)
   local context = eventAnnouncementContext(kind, title, text, severity, extra)
   local notification = makeNotification(kind, title, text, severity, extra)
-  local configured = configuredAnnouncement("event:" .. tostring(kind or ""), kind, context)
+  local configured = configuredEventAnnouncement(kind, context)
   if configured then
     applyConfiguredAnnouncement(notification, configured)
   end
@@ -2810,6 +3158,15 @@ function raiseAlarm(reason, doorId, actor, profileName)
 end
 
 function resetAlarm(actor)
+  local previousAlarm = {
+    active = state.alarm.active,
+    reason = state.alarm.reason,
+    door = state.alarm.door,
+    actor = state.alarm.actor,
+    profile = state.alarm.profile,
+    sinceMillis = state.alarm.sinceMillis,
+    soundStartAt = state.alarm.soundStartAt,
+  }
   setAlarmOutputs(false)
   state.alarm.active = false
   state.alarm.reason = nil
@@ -2822,7 +3179,13 @@ function resetAlarm(actor)
   clearAlarmAudioStreams(true)
   audit("ALARM_RESET", actor or "console")
   broadcastAlarmState()
-  broadcastEventNotification("alarm_reset", "Alarm Reset", "Alarm cleared by " .. tostring(actor or "console"), "info")
+  broadcastEventNotification("alarm_reset", "Alarm Reset", "Alarm cleared by " .. tostring(actor or "console"), "info", {
+    actor = actor or "console",
+    alarm = previousAlarm,
+    profile = previousAlarm.profile,
+    reason = previousAlarm.reason,
+    door = previousAlarm.door,
+  })
   markDirty()
 end
 
@@ -4543,8 +4906,7 @@ function employeeClearance(record)
     return direct
   end
 
-  local levels = config.employees and config.employees.clearanceLevels or {}
-  return tonumber(levels[record.role or "employee"]) or tonumber(config.employees and config.employees.defaultClearance) or 1
+  return tonumber(config.employees and config.employees.defaultClearance) or 1
 end
 
 function permissionLevel(permission)
@@ -5541,6 +5903,8 @@ function kioskSecurityPermission(action)
     return "lockdown"
   elseif action == "unlock_door" or action == "lock_door" then
     return "operateDoors"
+  elseif action == "personnel_request" then
+    return "sendMessage"
   elseif action == "quit_kiosk" then
     return "quitKiosk"
   elseif action == "setup" then
@@ -5574,6 +5938,53 @@ function handleKioskSecurityActionMessage(sender, message, reply)
     reply.ok = true
   elseif action == "alarm" then
     raiseAlarm(tostring(message.reason or "employee alarm"), nil, record.username, message.profile or "security")
+    reply.ok = true
+  elseif action == "personnel_request" then
+    local requester = record.displayName or record.username
+    local personnel = tostring(message.personnel or message.person or message.name or "available personnel")
+    if personnel == "" then
+      personnel = "available personnel"
+    end
+    local area = tostring(message.area or message.location or "")
+    if area == "" and message.door then
+      area = doorAnnouncementFields(message.door).area
+    end
+    if area == "" then
+      area = "unspecified area"
+    end
+    local personnelFields = personnelRequestFields(message, personnel)
+    local reasonFields = personnelReasonFields(message)
+    audit("PERSONNEL_REQUEST", {
+      actor = record.username,
+      requester = requester,
+      personnel = personnel,
+      personnelRole = personnelFields.personnelRole,
+      personnelTitle = personnelFields.personnelTitle,
+      personnelReason = reasonFields.personnelReasonLabel,
+      area = area,
+      door = message.door,
+    })
+    broadcastEventNotification("personnel_request", "Personnel Request", tostring(personnel) .. " requested in " .. tostring(area) .. " for " .. tostring(reasonFields.personnelReasonLabel), "info", {
+      actor = record.username,
+      requester = requester,
+      personnel = personnel,
+      personnelKey = announcementKey(personnel),
+      personnelRole = personnelFields.personnelRole,
+      personnelRoleKey = personnelFields.personnelRoleKey,
+      personnelTitle = personnelFields.personnelTitle,
+      personnelTitleKey = personnelFields.personnelTitleKey,
+      personnelVoiceLine = personnelFields.personnelVoiceLine,
+      personnelNameVoiceLine = personVoiceLineId(personnel),
+      personnelUsername = personnelFields.personnelUsername,
+      personnelReason = reasonFields.personnelReason,
+      personnelReasonKey = reasonFields.personnelReasonKey,
+      personnelReasonLabel = reasonFields.personnelReasonLabel,
+      personnelReasonVoiceLine = reasonFields.personnelReasonVoiceLine,
+      area = area,
+      areaKey = announcementKey(area),
+      areaVoiceLine = placeVoiceLineId(area),
+      door = message.door,
+    })
     reply.ok = true
   elseif action == "reset_alarm" then
     resetAlarm(record.username)
@@ -8078,6 +8489,31 @@ function saveKioskControllerSetting(enabled)
   end
 end
 
+function kioskLocationArea()
+  local kiosk = config and config.kiosk or {}
+  return firstTextValue(kiosk.area, kiosk.locationArea, kiosk.location, kiosk.zone) or ""
+end
+
+function saveKioskLocationArea(area)
+  config.kiosk = config.kiosk or {}
+  area = tostring(area or "")
+  config.kiosk.area = area
+  config.kiosk.locationArea = area
+  saveConfig()
+end
+
+function kioskLocationSetup()
+  clearScreen()
+  print("Kiosk Location")
+  print("Computer id: " .. tostring(localComputerId() or "?"))
+  print("Current area: " .. tostring(kioskLocationArea() ~= "" and kioskLocationArea() or "unset"))
+  print()
+  local area = kioskPromptLine("Area/location", kioskLocationArea())
+  saveKioskLocationArea(area or "")
+  print("Saved area: " .. tostring((area and area ~= "") and area or "unset"))
+  pause()
+end
+
 function kioskLocalControllerSetup()
   while true do
     clearScreen()
@@ -8159,6 +8595,7 @@ function kioskPrintSetupSummary(summary)
   print("Server computer: " .. tostring(summary.computerId or "?"))
   print("This kiosk id: " .. tostring(localComputerId() or "?"))
   print("This kiosk controller: " .. tostring(kioskControllerEnabled()))
+  print("This kiosk area: " .. tostring(kioskLocationArea() ~= "" and kioskLocationArea() or "unset"))
   print("Setup clearance: C" .. tostring(summary.setupClearance or "?"))
   print("Doors")
   for _, door in ipairs(summary.doors or {}) do
@@ -8376,6 +8813,7 @@ function kioskSetupMenu(serverId, brand, token, user)
       print("8. Issue/write employee badge")
     end
     print("9. This kiosk door-controller mode")
+    print("A. This kiosk location area")
     print("0. Remove configured item")
     print("B. Back")
 
@@ -8418,6 +8856,8 @@ function kioskSetupMenu(serverId, brand, token, user)
       kioskSetupIssueBadge(serverId, token)
     elseif choice == "9" then
       kioskLocalControllerSetup()
+    elseif choice == "a" then
+      kioskLocationSetup()
     elseif choice == "0" then
       kioskSetupRemoveItem(serverId, token, brand, user)
     elseif choice == "b" then
@@ -8445,6 +8885,27 @@ function requestKioskQuit(serverId, token)
   return true
 end
 
+function kioskPaRequest(serverId, brand, token, user)
+  drawKioskHeader(brand, user)
+  print("PA Request")
+  print("Kiosk area: " .. tostring(kioskLocationArea() ~= "" and kioskLocationArea() or "unset"))
+  print()
+
+  local payload = {
+    token = token,
+    action = "personnel_request",
+    personnel = kioskPromptLine("Personnel/name blank=available", ""),
+    personnelRole = kioskPromptLine("Title/role blank=auto", ""),
+    reason = kioskPromptLine("Reason blank=general", "general"),
+    area = kioskPromptLine("Area", kioskLocationArea()),
+  }
+
+  local reply = kioskRequest(serverId, "kiosk_security_action", payload)
+  print(reply.ok and "PA request sent." or ("Denied/failed: " .. tostring(reply.error)))
+  pause()
+  return true
+end
+
 function kioskSecurityActions(serverId, brand, token, user)
   while true do
     drawKioskHeader(brand, user)
@@ -8456,6 +8917,7 @@ function kioskSecurityActions(serverId, brand, token, user)
     print("5. Clear lockdown")
     print("6. Unlock door")
     print("7. Lock door")
+    print("8. Request personnel")
     print("B. Back")
 
     local choice = string.lower(kioskRead("> "))
@@ -8481,6 +8943,9 @@ function kioskSecurityActions(serverId, brand, token, user)
     elseif choice == "7" then
       payload.action = "lock_door"
       payload.door = kioskRead("Door id: ")
+    elseif choice == "8" then
+      kioskPaRequest(serverId, brand, token, user)
+      payload = nil
     elseif choice == "b" then
       return true
     else
@@ -8511,6 +8976,7 @@ function kioskMenu(serverId, brand, token, user)
     print("6. Security actions")
     print("7. Facility logs")
     print("8. Notifications")
+    print("P. PA request")
     if canSetup then
       print("9. Facility setup")
     end
@@ -8550,6 +9016,10 @@ function kioskMenu(serverId, brand, token, user)
       end
     elseif choice == "8" then
       kioskNotificationCenter(brand, user)
+    elseif choice == "p" then
+      if not kioskPaRequest(serverId, brand, token, user) then
+        return "logout"
+      end
     elseif choice == "9" and canSetup then
       if not kioskSetupMenu(serverId, brand, token, user) then
         return "logout"

@@ -69,13 +69,13 @@ local FALLBACK_MANIFEST = {
       path = ANNOUNCEMENTS_MODULE_FILE,
       required = true,
       minSize = 1000,
-      contains = { "Facility announcement audio", "SECURITY_SYSTEM_ASSET_ROOT", "function M.loadWav", "function M.buildAnnouncementBuffer", "playPcmOnSpeakers", "mixSamplesAt", "scaledSamples", "hasSamples", "syntheticVoice", "speaker_audio_empty", "function M.play" },
+      contains = { "Facility announcement audio", "SECURITY_SYSTEM_ASSET_ROOT", "function M.loadWav", "function M.buildAnnouncementBuffer", "playPcmOnSpeakers", "mixSamplesAt", "scaledSamples", "hasSamples", "variations", "voiceLines", "syntheticVoice", "speaker_audio_empty", "function M.play" },
     },
     {
       path = APP_MODULE_FILE,
       required = true,
       minSize = 2000,
-      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "DEFAULT_CONFIG_URL", "installRemoteConfigIfMissing", "installKioskConfigIfMissing", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "readerKindFor", "printReaderSourceHints", "kioskSetupReaderHints", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "alarmAudioStreamLoop", "speaker_audio_empty", "alarmSyncLeadMillis", "soundStartAt", "serverTimeMillis", "serverMillisToLocalMillis", "ensureNotificationPlaybackSchedule", "alignAnnouncementPcmToSchedule", "alignAlarmPcmToSchedule", "configuredAnnouncement", "configuredAnnouncementHasAudio", "alarmAnnouncementSuppressionActive", "announcementCanPlayDuringAlarm", "prebufferSeconds", "broadcastActionAnnouncement", "notificationUsesAnnouncementAudio", "announcementIsAlarmLike", "playFacilityAnnouncement", "pruneAnnouncementAudioStreams", "feedAnnouncementAudioStreams", "handleAnnouncementSpeakerAudioEmpty", "includeAlarm", "function main()", "return {" },
+      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "DEFAULT_CONFIG_URL", "installRemoteConfigIfMissing", "installKioskConfigIfMissing", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "readerKindFor", "printReaderSourceHints", "kioskSetupReaderHints", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "alarmAudioStreamLoop", "speaker_audio_empty", "alarmSyncLeadMillis", "soundStartAt", "serverTimeMillis", "serverMillisToLocalMillis", "ensureNotificationPlaybackSchedule", "alignAnnouncementPcmToSchedule", "alignAlarmPcmToSchedule", "doorAnnouncementFields", "configuredEventAnnouncement", "personnel_request", "personnelRequestFields", "personnelReasonFields", "personnelTitleLabel", "kioskLocationArea", "kioskPaRequest", "configuredAnnouncement", "configuredAnnouncementHasAudio", "voiceLines", "alarmAnnouncementSuppressionActive", "announcementCanPlayDuringAlarm", "prebufferSeconds", "broadcastActionAnnouncement", "notificationUsesAnnouncementAudio", "announcementIsAlarmLike", "playFacilityAnnouncement", "pruneAnnouncementAudioStreams", "feedAnnouncementAudioStreams", "handleAnnouncementSpeakerAudioEmpty", "includeAlarm", "function main()", "return {" },
     },
     {
       path = PROGRAM,
@@ -90,7 +90,44 @@ local FALLBACK_MANIFEST = {
       contains = APP_MODULE_FILE,
     },
   },
-  assets = {},
+  assets = {
+    { path = "announcements/announcement_jingle.wav", binary = true, kind = "wav" },
+    { path = "announcements/jingle_alarm.wav", binary = true, kind = "wav" },
+    { path = "announcements/jingle_notification.wav", binary = true, kind = "wav" },
+    { path = "announcements/red_alert.wav", binary = true, kind = "wav" },
+    { path = "announcements/red_alert_a.wav", binary = true, kind = "wav" },
+    { path = "announcements/red_alert_b.wav", binary = true, kind = "wav" },
+    { path = "announcements/slopday.wav", binary = true, kind = "wav" },
+    { path = "announcements/slopdaycancelled.wav", binary = true, kind = "wav" },
+    { path = "announcements/slopdaynonono.wav", binary = true, kind = "wav" },
+    { path = "announcements/slopdayslop.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_admin.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_alarm.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_attention.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_disengaged.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_doctor.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_employee.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_engaged.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_engineer.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_for.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_lockdown.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_maintenance.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_meeting.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_memeorpo.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_person_crafthessu.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_person_faceremover.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_person_lucsaani.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_person_mauppi.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_person_skaahejo.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_personnelrequest_general_reason.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_place_frontentrance.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_place_mainshaft.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_place_serverroom.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_questioning.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_secalarm.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_security.wav", binary = true, kind = "wav" },
+    { path = "announcements/vo_yourequested.wav", binary = true, kind = "wav" },
+  },
 }
 
 local function clear()
@@ -429,7 +466,7 @@ local function writeFallbackKioskConfig()
     "  mode = \"kiosk\",",
     "  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },",
     "  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },",
-    "  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },",
+    "  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },",
     "  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },",
     "  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.05, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },",
     "  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },",
@@ -661,6 +698,10 @@ local PRESERVED_CONFIG_KEYS = {
 
 local PRESERVED_CONFIG_PATHS = {
   { "kiosk", "controller" },
+  { "kiosk", "area" },
+  { "kiosk", "locationArea" },
+  { "kiosk", "location" },
+  { "kiosk", "zone" },
   { "monitors", "devices" },
   { "rednet", "serverId" },
   { "employees", "accountsFile" },
@@ -1023,6 +1064,21 @@ local function syncConfigFromSecurityServer(mode)
           decoded.config.kiosk = decoded.config.kiosk or {}
           decoded.config.kiosk.controller = current.kiosk.controller
         end
+        if current.kiosk then
+          decoded.config.kiosk = decoded.config.kiosk or {}
+          if current.kiosk.area ~= nil then
+            decoded.config.kiosk.area = current.kiosk.area
+          end
+          if current.kiosk.locationArea ~= nil then
+            decoded.config.kiosk.locationArea = current.kiosk.locationArea
+          end
+          if current.kiosk.location ~= nil then
+            decoded.config.kiosk.location = current.kiosk.location
+          end
+          if current.kiosk.zone ~= nil then
+            decoded.config.kiosk.zone = current.kiosk.zone
+          end
+        end
         local oldText = readFile(configPath())
         local newText = "-- Synced from security server by startup_auto_update.lua.\nreturn " .. textutils.serialize(decoded.config) .. "\n"
         if oldText == newText then
@@ -1339,6 +1395,7 @@ local function selfUpdateFileEntry(manifest)
         "applyLocalDataToConfig",
         "localDataForMode",
         "localDataSummary",
+        "locationArea",
         "protectedLocalStatePath",
         "overwriteConfigFromGithub",
         "function main()",
@@ -1360,6 +1417,7 @@ local function selfUpdateFileEntry(manifest)
       "applyLocalDataToConfig",
       "localDataForMode",
       "localDataSummary",
+      "locationArea",
       "protectedLocalStatePath",
       "overwriteConfigFromGithub",
       "function main()",

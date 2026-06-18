@@ -372,6 +372,11 @@ samplesFromSpec = function(spec, config, alarmLike)
     return nil
   end
 
+  local variations = spec.variations or spec.variants or spec.choices
+  if type(variations) == "table" and #variations > 0 then
+    return samplesFromSpec(variations[math.random(1, #variations)], config, alarmLike)
+  end
+
   if type(spec.pcm) == "table" or type(spec.samples) == "table" then
     local samples = spec.pcm or spec.samples
     if spec.sampleRate then
@@ -480,6 +485,38 @@ local function configuredVoice(announcement, config, alarmLike)
   end
 
   local lines = config.voiceLines or {}
+  local sequence = announcement and (announcement.voiceLines or announcement.voiceLineParts or announcement.voiceSequence)
+  if type(sequence) == "table" then
+    local buffer = {}
+    for _, part in ipairs(sequence) do
+      local samples = nil
+      if type(part) == "string" or type(part) == "number" then
+        local id = tostring(part or "")
+        if id ~= "" then
+          if lines[id] ~= nil or lines[tostring(id)] ~= nil then
+            samples = samplesFromSpec(lines[id] or lines[tostring(id)], config, alarmLike)
+          else
+            samples = samplesFromSpec(id, config, alarmLike)
+          end
+        end
+      elseif type(part) == "table" then
+        local id = part.voiceLine or part.voice or part.id
+        if id and tostring(id) ~= "" and (lines[id] ~= nil or lines[tostring(id)] ~= nil) then
+          samples = samplesFromSpec(lines[id] or lines[tostring(id)], config, alarmLike)
+        else
+          samples = samplesFromSpec(part, config, alarmLike)
+        end
+      end
+
+      if hasSamples(samples) then
+        appendSamples(buffer, samples)
+      end
+    end
+    if hasSamples(buffer) then
+      return buffer
+    end
+  end
+
   local id = announcement and announcement.voiceLine
   if id and (lines[id] ~= nil or lines[tostring(id)] ~= nil) then
     local samples = samplesFromSpec(lines[id] or lines[tostring(id)], config, alarmLike)
