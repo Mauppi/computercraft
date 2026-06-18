@@ -68,7 +68,7 @@ local FALLBACK_MANIFEST = {
       path = ANNOUNCEMENTS_MODULE_FILE,
       required = true,
       minSize = 1000,
-      contains = { "Facility announcement audio", "SECURITY_SYSTEM_ASSET_ROOT", "function M.loadWav", "function M.buildAnnouncementBuffer", "playPcmOnSpeakers", "mixSamplesAt", "scaledSamples", "speaker_audio_empty", "function M.play" },
+      contains = { "Facility announcement audio", "SECURITY_SYSTEM_ASSET_ROOT", "function M.loadWav", "function M.buildAnnouncementBuffer", "playPcmOnSpeakers", "mixSamplesAt", "scaledSamples", "hasSamples", "syntheticVoice", "speaker_audio_empty", "function M.play" },
     },
     {
       path = APP_MODULE_FILE,
@@ -426,7 +426,7 @@ local function writeFallbackKioskConfig()
     "  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },",
     "  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },",
     "  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },",
-    "  announcements = { enabled = true, sound = true, voice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.1, tailSeconds = 0.5, maxChunksPerFeed = 2, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },",
+    "  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.1, tailSeconds = 0.5, maxChunksPerFeed = 2, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },",
     "  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },",
     "}",
   }

@@ -70,6 +70,7 @@ return {
     enabled = true,
     sound = true,
     voice = false,
+    syntheticVoice = false,
     requireVoiceLine = true,
     volume = 1,
     sampleRate = 48000,

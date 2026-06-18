@@ -73,6 +73,8 @@ return {
         "playPcmOnSpeakers",
         "mixSamplesAt",
         "scaledSamples",
+        "hasSamples",
+        "syntheticVoice",
         "speaker_audio_empty",
         "function M.play",
       },

@@ -188,6 +188,10 @@ local function scaledSamples(samples, gain)
   return out
 end
 
+local function hasSamples(samples)
+  return type(samples) == "table" and #samples > 0
+end
+
 function M.loadWav(path, config)
   local data, err = readFile(path)
   if not data then
@@ -358,7 +362,11 @@ local samplesFromSpec
 
 samplesFromSpec = function(spec, config, alarmLike)
   if type(spec) == "string" then
-    return M.loadWav(spec, config)
+    local samples = M.loadWav(spec, config)
+    if hasSamples(samples) then
+      return samples
+    end
+    return nil
   end
   if type(spec) ~= "table" then
     return nil
@@ -369,13 +377,17 @@ samplesFromSpec = function(spec, config, alarmLike)
     if spec.sampleRate then
       samples = resample(samples, spec.sampleRate, targetRate(config))
     end
-    return scaledSamples(samples, spec.gain or spec.volume)
+    samples = scaledSamples(samples, spec.gain or spec.volume)
+    if hasSamples(samples) then
+      return samples
+    end
+    return nil
   end
 
   local wav = spec.wav or spec.file or spec.path
   if wav then
     local samples = M.loadWav(wav, config)
-    if samples then
+    if hasSamples(samples) then
       return scaledSamples(samples, spec.gain or spec.volume)
     end
   end
@@ -394,7 +406,7 @@ samplesFromSpec = function(spec, config, alarmLike)
       end
 
       local samples = samplesFromSpec(layerSpec, config, alarmLike)
-      if samples and #samples > 0 then
+      if hasSamples(samples) then
         local startIndex = nil
         if type(layer) == "table" then
           startIndex = layer.offsetSamples or layer.startSamples
@@ -428,19 +440,27 @@ samplesFromSpec = function(spec, config, alarmLike)
     local overlap = secondsToSamples(spec.overlapSeconds or spec.overlap, config)
     for _, part in ipairs(parts) do
       local samples = samplesFromSpec(part, config, alarmLike)
-      if overlap > 0 and #buffer > 0 then
-        mixSamplesAt(buffer, samples, math.max(1, #buffer - overlap + 1))
-      else
-        appendSamples(buffer, samples)
+      if hasSamples(samples) then
+        if overlap > 0 and #buffer > 0 then
+          mixSamplesAt(buffer, samples, math.max(1, #buffer - overlap + 1))
+        else
+          appendSamples(buffer, samples)
+        end
       end
     end
-    return buffer
+    if #buffer > 0 then
+      return buffer
+    end
+    return nil
   end
 
   if type(spec.tones) == "table" then
     local buffer = {}
     appendTones(buffer, spec.tones, config, alarmLike and "alarm" or "jingle")
-    return buffer
+    if #buffer > 0 then
+      return buffer
+    end
+    return nil
   end
 
   return nil
@@ -454,20 +474,28 @@ end
 local function configuredVoice(announcement, config, alarmLike)
   if type(announcement) == "table" then
     local direct = samplesFromSpec(announcement, config, alarmLike)
-    if direct then
+    if hasSamples(direct) then
       return direct
     end
   end
 
   local lines = config.voiceLines or {}
   local id = announcement and announcement.voiceLine
-  if id and lines[id] ~= nil then
-    return samplesFromSpec(lines[id], config, alarmLike)
+  if id and (lines[id] ~= nil or lines[tostring(id)] ~= nil) then
+    local samples = samplesFromSpec(lines[id] or lines[tostring(id)], config, alarmLike)
+    if hasSamples(samples) then
+      return samples
+    end
+    return nil
   end
 
   local kind = announcement and (announcement.kind or announcement.type)
-  if kind and lines[kind] ~= nil then
-    return samplesFromSpec(lines[kind], config, alarmLike)
+  if kind and (lines[kind] ~= nil or lines[tostring(kind)] ~= nil) then
+    local samples = samplesFromSpec(lines[kind] or lines[tostring(kind)], config, alarmLike)
+    if hasSamples(samples) then
+      return samples
+    end
+    return nil
   end
 
   return nil
@@ -501,16 +529,20 @@ function M.buildAnnouncementBuffer(announcement, config)
     return buffer
   end
 
+  local body = voice
+  if not hasSamples(body) and config.syntheticVoice == true then
+    local text = (announcement and (announcement.text or announcement.message or announcement.title)) or ""
+    body = M.buildVoiceBuffer(text, config.voiceConfig or config)
+  end
+  if not hasSamples(body) then
+    return buffer
+  end
+
   if config.jingle ~= false then
     appendSamples(buffer, configuredJingle(config, alarmLike))
   end
 
-  if voice then
-    appendSamples(buffer, voice)
-  elseif config.voice ~= false then
-    local text = (announcement and (announcement.text or announcement.message or announcement.title)) or ""
-    appendSamples(buffer, M.buildVoiceBuffer(text, config.voiceConfig or config))
-  end
+  appendSamples(buffer, body)
 
   return buffer
 end
