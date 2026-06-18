@@ -2770,7 +2770,7 @@ function announcementFeedSpeakerStream(speakerName)
   if not stream then
     return false
   end
-  if (state.alarm.active or alarmAudioBusy()) and not stream.allowDuringAlarm then
+  if state.alarm.active and not stream.allowDuringAlarm then
     clearAnnouncementAudioStreams(true)
     return false
   end

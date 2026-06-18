@@ -721,58 +721,6 @@ return {
   },
 
   doors = {
-    front_door = {
-      label = "Front Door",
-      area = "Main Entrance",
-      controller = "server",
-
-      -- Iron doors normally open when redstone is on.
-      output = { side = "front" },
-      activeOpen = true,
-      openSeconds = 4,
-
-      -- Local per-door credentials.
-      badges = {
-        "label:Guard Badge",
-        "rfid:guard-rfid-token",
-        -- "disk:12345",
-        -- "nfc:front-door-card",
-        -- "badge:abc123",
-      },
-      players = {
-        "Steve",
-      },
-      pins = {
-        "1234",
-      },
-
-      -- Optional forced-open sensor. When this input means "open" while the
-      -- door should be locked, the alarm is raised.
-      contact = { side = "back", openWhen = true },
-
-      -- Optional request-to-exit button or pressure plate.
-      requestExit = { side = "right", activeWhen = true },
-
-      alarmOnDenied = false,
-      deniedBeforeAlarm = 3,
-    },
-
-    vault = {
-      label = "Vault",
-      controller = "server",
-      output = { peripheral = "redstoneIntegrator_0", side = "left" },
-      activeOpen = true,
-      openSeconds = 3,
-      badges = {
-        "label:Vault Badge",
-      },
-      pins = {
-        "9876",
-      },
-      contact = { peripheral = "redstoneIntegrator_0", side = "right", openWhen = true },
-      alarmOnDenied = true,
-      deniedBeforeAlarm = 1,
-    },
   },
 
   sensors = {
