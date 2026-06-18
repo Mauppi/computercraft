@@ -2,6 +2,7 @@
 -- Copy this file to "startup.lua" on server or kiosk computers.
 
 local DEFAULT_BASE_URL = "https://raw.githubusercontent.com/Mauppi/computercraft/master/"
+local SELF_UPDATE_FILE = "startup_auto_update.lua"
 local MANIFEST_FILE = "security_system_manifest.lua"
 local MANIFEST_URL = DEFAULT_BASE_URL .. MANIFEST_FILE
 local PROGRAM = "security_system.lua"
@@ -67,13 +68,13 @@ local FALLBACK_MANIFEST = {
       path = ANNOUNCEMENTS_MODULE_FILE,
       required = true,
       minSize = 1000,
-      contains = { "Facility announcement audio", "SECURITY_SYSTEM_ASSET_ROOT", "function M.loadWav", "function M.buildAnnouncementBuffer", "playPcmOnSpeakers", "mixSamplesAt", "speaker_audio_empty", "function M.play" },
+      contains = { "Facility announcement audio", "SECURITY_SYSTEM_ASSET_ROOT", "function M.loadWav", "function M.buildAnnouncementBuffer", "playPcmOnSpeakers", "mixSamplesAt", "scaledSamples", "speaker_audio_empty", "function M.play" },
     },
     {
       path = APP_MODULE_FILE,
       required = true,
       minSize = 2000,
-      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "DEFAULT_CONFIG_URL", "installRemoteConfigIfMissing", "installKioskConfigIfMissing", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "readerKindFor", "printReaderSourceHints", "kioskSetupReaderHints", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "alarmAudioStreamLoop", "speaker_audio_empty", "alarmSyncLeadMillis", "soundStartAt", "configuredAnnouncement", "broadcastActionAnnouncement", "notificationUsesAnnouncementAudio", "announcementIsAlarmLike", "playFacilityAnnouncement", "pruneAnnouncementAudioStreams", "feedAnnouncementAudioStreams", "handleAnnouncementSpeakerAudioEmpty", "includeAlarm", "function main()", "return {" },
+      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "DEFAULT_CONFIG_URL", "installRemoteConfigIfMissing", "installKioskConfigIfMissing", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "readerKindFor", "printReaderSourceHints", "kioskSetupReaderHints", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "alarmAudioStreamLoop", "speaker_audio_empty", "alarmSyncLeadMillis", "soundStartAt", "configuredAnnouncement", "configuredAnnouncementHasAudio", "alarmAnnouncementSuppressionActive", "announcementCanPlayDuringAlarm", "broadcastActionAnnouncement", "notificationUsesAnnouncementAudio", "announcementIsAlarmLike", "playFacilityAnnouncement", "pruneAnnouncementAudioStreams", "feedAnnouncementAudioStreams", "handleAnnouncementSpeakerAudioEmpty", "includeAlarm", "function main()", "return {" },
     },
     {
       path = PROGRAM,
@@ -425,7 +426,7 @@ local function writeFallbackKioskConfig()
     "  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },",
     "  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },",
     "  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },",
-    "  announcements = { enabled = true, sound = true, voice = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.1, tailSeconds = 0.5, maxChunksPerFeed = 2, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },",
+    "  announcements = { enabled = true, sound = true, voice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.1, tailSeconds = 0.5, maxChunksPerFeed = 2, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },",
     "  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },",
     "}",
   }
@@ -531,8 +532,15 @@ local function writeFile(path, data, binary)
   local dir = fs.getDir(path)
   local spacePath = (dir and dir ~= "") and dir or ""
   local available = freeSpace(spacePath)
-  if available > 0 and available < #data then
-    return false, "not enough free space for " .. tostring(path) .. " (" .. tostring(#data) .. " bytes needed, " .. tostring(available) .. " free)"
+  local reusable = 0
+  if fs.exists(path) and fs.getSize then
+    local okSize, size = pcall(fs.getSize, path)
+    if okSize then
+      reusable = tonumber(size) or 0
+    end
+  end
+  if available > 0 and (available + reusable) < #data then
+    return false, "not enough free space for " .. tostring(path) .. " (" .. tostring(#data) .. " bytes needed, " .. tostring(available) .. " free, " .. tostring(reusable) .. " reusable)"
   end
 
   local handle = openFile(path, binary and "wb" or "w", binary and "w" or nil)
@@ -947,15 +955,274 @@ local function normalizeConfigEntry(manifest)
   }
 end
 
-local function validateConfigText(body, label)
+local function validateConfigText(body, label, expectedMode)
   local loaded, loadErr = loadReturnedTable(body, label)
   if not loaded then
     return false, loadErr
+  end
+  expectedMode = normalizedMode(expectedMode)
+  if expectedMode then
+    local actualMode = normalizedMode(loaded.mode)
+    if actualMode ~= expectedMode then
+      return false, "downloaded config mode was " .. tostring(loaded.mode or "missing") .. ", expected " .. expectedMode
+    end
+    return true
   end
   if loaded.mode and string.lower(tostring(loaded.mode)) == "kiosk" then
     return false, "downloaded config is kiosk mode"
   end
   return true
+end
+
+local function isKioskConfigMode(mode)
+  mode = normalizedMode(mode)
+  return mode == "kiosk" or mode == "controller" or mode == "door"
+end
+
+local function configEntryForMode(mode, manifest)
+  if isKioskConfigMode(mode) then
+    return {
+      path = KIOSK_CONFIG_EXAMPLE,
+      target = configPath(),
+      exampleTarget = installPath(KIOSK_CONFIG_EXAMPLE),
+      required = true,
+      minSize = 100,
+      contains = { "return", "mode = \"kiosk\"" },
+      expectedMode = "kiosk",
+      label = "kiosk",
+    }
+  end
+
+  local entry = normalizeConfigEntry(manifest)
+  entry.path = CONFIG_FILE
+  entry.target = configPath()
+  entry.url = nil
+  entry.required = true
+  entry.minSize = tonumber(entry.minSize) or 100
+  if entry.minSize < 100 then
+    entry.minSize = 100
+  end
+  entry.contains = { "return", "mode = \"server\"" }
+  entry.expectedMode = "server"
+  entry.label = "server"
+  return entry
+end
+
+local function validateDownloadedConfig(entry, body, url)
+  local ok, validErr = validateFile(entry, body)
+  if not ok then
+    return false, validErr
+  end
+
+  return validateConfigText(body, "@" .. tostring(url), entry.expectedMode)
+end
+
+local function overwriteTextFile(path, body)
+  local current = readFile(path, false)
+  local changed = current ~= body
+  backupFile(path, #body)
+
+  local writeOk, writeErr = writeFile(path, body, false)
+  if not writeOk then
+    local backup = path .. ".bak"
+    if fs.exists(backup) then
+      if fs.exists(path) then
+        pcall(fs.delete, path)
+      end
+      pcall(fs.copy, backup, path)
+    end
+    return false, writeErr or "write failed", false
+  end
+
+  return true, "written", changed
+end
+
+local function overwriteConfigFromGithub(mode)
+  if not (http and http.get) then
+    return false, "HTTP API is disabled; cannot download GitHub config", false
+  end
+
+  local manifest, manifestSource = fetchManifest()
+  local entry = configEntryForMode(mode, manifest)
+  local baseUrl = entry.baseUrl or (manifest and manifest.baseUrl) or DEFAULT_BASE_URL
+  local sourcePath = tostring(entry.path or CONFIG_FILE)
+  local url = fileUrl(baseUrl, sourcePath)
+  local body, fetchErr = fetchUrl(url, false)
+  if not body then
+    return false, sourcePath .. ": " .. tostring(fetchErr or "download failed"), false
+  end
+
+  local ok, validErr = validateDownloadedConfig(entry, body, url)
+  if not ok then
+    return false, sourcePath .. ": " .. tostring(validErr), false
+  end
+
+  local updated = false
+  local target = entry.target or configPath()
+  local writeOk, writeMessage, changed = overwriteTextFile(target, body)
+  if not writeOk then
+    return false, "could not write " .. tostring(target) .. ": " .. tostring(writeMessage), false
+  end
+  updated = updated or changed
+
+  local extraTarget = entry.exampleTarget
+  if extraTarget and extraTarget ~= target then
+    local exampleOk, exampleMessage, exampleChanged = overwriteTextFile(extraTarget, body)
+    if not exampleOk then
+      return false, "could not write " .. tostring(extraTarget) .. ": " .. tostring(exampleMessage), updated
+    end
+    updated = updated or exampleChanged
+  end
+
+  local detail = tostring(entry.label or mode or "server") .. " config from " .. sourcePath .. " (" .. tostring(manifestSource) .. ")"
+  if updated then
+    return true, "updated " .. detail, true
+  end
+  return true, "refreshed " .. detail, false
+end
+
+local function selfUpdateFileEntry(manifest)
+  local entries = manifestEntries(manifest or {})
+  for _, file in ipairs(entries) do
+    if type(file) == "table" and tostring(file.path or "") == SELF_UPDATE_FILE then
+      local copy = {}
+      for key, value in pairs(file) do
+        copy[key] = value
+      end
+      copy.path = SELF_UPDATE_FILE
+      copy.required = false
+      copy.binary = false
+      copy.minSize = math.max(tonumber(copy.minSize) or 1000, 1000)
+      copy.contains = {
+        "Manifest-driven auto-updating",
+        "SELF_UPDATE_FILE",
+        "selfUpdateFromGithub",
+        "overwriteConfigFromGithub",
+        "function main()",
+      }
+      return copy
+    end
+  end
+
+  return {
+    path = SELF_UPDATE_FILE,
+    required = false,
+    binary = false,
+    minSize = 1000,
+    contains = {
+      "Manifest-driven auto-updating",
+      "SELF_UPDATE_FILE",
+      "selfUpdateFromGithub",
+      "overwriteConfigFromGithub",
+      "function main()",
+    },
+  }
+end
+
+local function runningProgramPath()
+  if shell and shell.getRunningProgram then
+    local ok, path = pcall(shell.getRunningProgram)
+    if ok then
+      path = normalizePath(path)
+      if path ~= "" then
+        return path
+      end
+    end
+  end
+
+  if fs.exists("startup.lua") then
+    return "startup.lua"
+  end
+  if fs.exists("startup") then
+    return "startup"
+  end
+  return SELF_UPDATE_FILE
+end
+
+local function addSelfUpdateTarget(targets, seen, path)
+  path = normalizePath(path)
+  if path == "" or seen[path] then
+    return
+  end
+  if path == "rom" or string.sub(path, 1, 4) == "rom/" then
+    return
+  end
+
+  seen[path] = true
+  table.insert(targets, path)
+end
+
+local function selfUpdateTargets()
+  local targets = {}
+  local seen = {}
+
+  addSelfUpdateTarget(targets, seen, runningProgramPath())
+  addSelfUpdateTarget(targets, seen, SELF_UPDATE_FILE)
+  addSelfUpdateTarget(targets, seen, installPath(SELF_UPDATE_FILE))
+
+  return targets
+end
+
+local function writeSelfUpdateTarget(path, body)
+  local current = readFile(path, false)
+  if current == body then
+    return true, "current", false
+  end
+  return overwriteTextFile(path, body)
+end
+
+local function selfUpdateFromGithub()
+  if not (http and http.get) then
+    return false, "HTTP API is disabled", false
+  end
+
+  local manifest, manifestSource = fetchManifest()
+  local entry = selfUpdateFileEntry(manifest)
+  local baseUrl = entry.baseUrl or (manifest and manifest.baseUrl) or DEFAULT_BASE_URL
+  local url = entry.url or fileUrl(baseUrl, SELF_UPDATE_FILE)
+  local body, fetchErr = fetchUrl(url, false)
+  if not body then
+    return false, SELF_UPDATE_FILE .. ": " .. tostring(fetchErr or "download failed"), false
+  end
+
+  local ok, validErr = validateFile(entry, body)
+  if not ok then
+    return false, SELF_UPDATE_FILE .. ": " .. tostring(validErr), false
+  end
+
+  local targets = selfUpdateTargets()
+  if #targets == 0 then
+    return true, "no writable startup target found", false
+  end
+
+  local changedTargets = {}
+  local failedTargets = {}
+  local wroteAny = false
+  local updated = false
+
+  for _, target in ipairs(targets) do
+    local writeOk, writeMessage, changed = writeSelfUpdateTarget(target, body)
+    if writeOk then
+      wroteAny = true
+      if changed then
+        updated = true
+        changedTargets[#changedTargets + 1] = target
+      end
+    else
+      failedTargets[#failedTargets + 1] = target .. " (" .. tostring(writeMessage) .. ")"
+    end
+  end
+
+  if not wroteAny then
+    return false, "could not write any startup target: " .. table.concat(failedTargets, "; "), false
+  end
+  if #failedTargets > 0 then
+    return true, "updated from " .. tostring(manifestSource) .. "; some targets failed: " .. table.concat(failedTargets, "; "), updated
+  end
+  if updated then
+    return true, "updated " .. table.concat(changedTargets, ", ") .. " from " .. tostring(manifestSource), true
+  end
+  return true, "already current from " .. tostring(manifestSource), false
 end
 
 local function installServerConfigIfMissing(mode)
@@ -1148,27 +1415,18 @@ local function main()
   local ok, message, updated = fetchUpdate()
   print((ok and "Update: " or "Update failed: ") .. tostring(message))
 
-  local kioskConfigOk, kioskConfigMessage, kioskConfigUpdated = copyKioskConfigIfMissing(mode)
-  print((kioskConfigOk and "Kiosk config: " or "Kiosk config failed: ") .. tostring(kioskConfigMessage))
-  if not kioskConfigOk then
-    print("Refusing to start without kiosk config.")
+  local selfOk, selfMessage, selfUpdated = selfUpdateFromGithub()
+  print((selfOk and "Self-update: " or "Self-update failed: ") .. tostring(selfMessage))
+  updated = updated or selfUpdated
+
+  local configOk, configMessage, configUpdated = overwriteConfigFromGithub(mode)
+  print((configOk and "Config: " or "Config failed: ") .. tostring(configMessage))
+  if not configOk then
+    print("Refusing to start without current GitHub config.")
     return
   end
-  updated = updated or kioskConfigUpdated
-  mode = readConfigMode()
-
-  local serverConfigOk, serverConfigMessage, serverConfigUpdated = installServerConfigIfMissing(mode)
-  print((serverConfigOk and "Server config: " or "Server config failed: ") .. tostring(serverConfigMessage))
-  if not serverConfigOk then
-    print("Refusing to start without " .. CONFIG_FILE .. ".")
-    return
-  end
-  updated = updated or serverConfigUpdated
-  mode = readConfigMode()
-
-  local configOk, configMessage, configUpdated = syncConfigFromSecurityServer(mode)
-  print((configOk and "Config: " or "Config sync failed: ") .. tostring(configMessage))
   updated = updated or configUpdated
+  mode = readConfigMode()
 
   local audioOk, audioMessage, audioUpdated = fetchConfiguredWavs()
   print((audioOk and "Audio: " or "Audio sync failed: ") .. tostring(audioMessage))

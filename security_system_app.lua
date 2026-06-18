@@ -378,7 +378,7 @@ function installKioskConfigIfMissing()
   handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
   handle.writeLine("  kiosk = { locked = true, syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.1, tailSeconds = 0.5, maxChunksPerFeed = 2, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.1, tailSeconds = 0.5, maxChunksPerFeed = 2, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
@@ -1232,6 +1232,51 @@ function notificationUsesAnnouncementAudio(notification)
   return notification.announcement == true or kind == "announcement" or kind == "alarm" or kind == "emergency" or kind == "lockdown" or kind == "lockdown_clear"
 end
 
+function announcementKindValue(announcement)
+  if type(announcement) == "table" then
+    return tostring(announcement.kind or announcement.type or "")
+  end
+  return tostring(announcement or "")
+end
+
+function announcementIsAlarmOrEmergencyKind(kind)
+  kind = tostring(kind or "")
+  return kind == "alarm" or kind == "emergency"
+end
+
+function alarmAnnouncementSuppressionActive()
+  if state.alarm and state.alarm.active then
+    return true
+  end
+  if type(alarmAudioBusy) == "function" and alarmAudioBusy() then
+    return true
+  end
+  return false
+end
+
+function announcementCanPlayDuringAlarm(announcement)
+  return announcementIsAlarmOrEmergencyKind(announcementKindValue(announcement))
+end
+
+function configuredAnnouncementAllowedDuringAlarm(key, fallbackKey, spec)
+  if not alarmAnnouncementSuppressionActive() then
+    return true
+  end
+  if announcementIsAlarmOrEmergencyKind(key) or announcementIsAlarmOrEmergencyKind(fallbackKey) then
+    return true
+  end
+  if type(key) == "string" and (key == "event:alarm" or key == "event:emergency") then
+    return true
+  end
+  if type(fallbackKey) == "string" and (fallbackKey == "event:alarm" or fallbackKey == "event:emergency") then
+    return true
+  end
+  if type(spec) == "table" and announcementIsAlarmOrEmergencyKind(spec.kind or spec.type) then
+    return true
+  end
+  return false
+end
+
 function broadcastKioskNotification(notification, targetUser)
   local options = notificationConfig()
   if options.enabled == false then
@@ -1439,6 +1484,30 @@ function configuredAnnouncementVoice(spec, variant)
   return chooseAnnouncementValue(value)
 end
 
+function configuredAnnouncementAudioField(spec, variant, field)
+  if type(variant) == "table" and variant[field] ~= nil then
+    return variant[field]
+  end
+  if type(spec) == "table" and spec[field] ~= nil then
+    return spec[field]
+  end
+  return nil
+end
+
+function configuredAnnouncementHasAudio(spec, variant, voiceLine)
+  if voiceLine ~= nil and tostring(voiceLine) ~= "" then
+    return true
+  end
+  local fields = { "wav", "file", "path", "files", "pcm", "samples", "mix", "layers", "overlay", "overlays", "parts", "segments" }
+  for _, field in ipairs(fields) do
+    local value = configuredAnnouncementAudioField(spec, variant, field)
+    if value ~= nil then
+      return true
+    end
+  end
+  return false
+end
+
 function configuredAnnouncement(key, fallbackKey, context)
   local announcements = announcementConfig()
   if announcements.enabled == false or announcements.eventAnnouncements == false then
@@ -1451,6 +1520,9 @@ function configuredAnnouncement(key, fallbackKey, context)
   if spec == nil then
     return nil
   end
+  if not configuredAnnouncementAllowedDuringAlarm(key, fallbackKey, spec) then
+    return nil
+  end
   if not announcementSpecAllowed(key, spec) then
     return nil
   end
@@ -1461,13 +1533,17 @@ function configuredAnnouncement(key, fallbackKey, context)
   end
 
   local text = configuredAnnouncementText(spec, variant)
-  if not text or text == "" then
+  local voiceLine = configuredAnnouncementVoice(spec, variant)
+  if announcements.requireVoiceLine and not configuredAnnouncementHasAudio(spec, variant, voiceLine) then
     return nil
+  end
+  if not text or text == "" then
+    text = firstTextValue(type(variant) == "table" and variant.title or nil, type(spec) == "table" and spec.title or nil, "Facility announcement")
   end
 
   local out = {
     text = formatAnnouncementTemplate(text, context),
-    voiceLine = configuredAnnouncementVoice(spec, variant),
+    voiceLine = voiceLine,
   }
 
   if type(spec) == "table" then
@@ -1478,6 +1554,13 @@ function configuredAnnouncement(key, fallbackKey, context)
     out.wav = spec.wav
     out.files = spec.files
     out.pcm = spec.pcm
+    out.samples = spec.samples
+    out.mix = spec.mix
+    out.layers = spec.layers
+    out.overlay = spec.overlay
+    out.overlays = spec.overlays
+    out.parts = spec.parts
+    out.segments = spec.segments
   end
   if type(variant) == "table" then
     out.kind = variant.kind or out.kind
@@ -1494,6 +1577,27 @@ function configuredAnnouncement(key, fallbackKey, context)
     end
     if variant.pcm ~= nil then
       out.pcm = variant.pcm
+    end
+    if variant.samples ~= nil then
+      out.samples = variant.samples
+    end
+    if variant.mix ~= nil then
+      out.mix = variant.mix
+    end
+    if variant.layers ~= nil then
+      out.layers = variant.layers
+    end
+    if variant.overlay ~= nil then
+      out.overlay = variant.overlay
+    end
+    if variant.overlays ~= nil then
+      out.overlays = variant.overlays
+    end
+    if variant.parts ~= nil then
+      out.parts = variant.parts
+    end
+    if variant.segments ~= nil then
+      out.segments = variant.segments
     end
   end
   out.title = out.title and formatAnnouncementTemplate(out.title, context) or nil
@@ -1527,6 +1631,27 @@ function applyConfiguredAnnouncement(notification, configured)
   end
   if configured.pcm ~= nil then
     notification.pcm = configured.pcm
+  end
+  if configured.samples ~= nil then
+    notification.samples = configured.samples
+  end
+  if configured.mix ~= nil then
+    notification.mix = configured.mix
+  end
+  if configured.layers ~= nil then
+    notification.layers = configured.layers
+  end
+  if configured.overlay ~= nil then
+    notification.overlay = configured.overlay
+  end
+  if configured.overlays ~= nil then
+    notification.overlays = configured.overlays
+  end
+  if configured.parts ~= nil then
+    notification.parts = configured.parts
+  end
+  if configured.segments ~= nil then
+    notification.segments = configured.segments
   end
   return notification
 end
@@ -1582,6 +1707,9 @@ function broadcastAnnouncement(text, actor, voiceLine)
   if not announcementEnabled() then
     return false, "announcements disabled"
   end
+  if alarmAnnouncementSuppressionActive() then
+    return false, "normal announcements suppressed while alarm is active"
+  end
 
   text = tostring(text or "")
   if text == "" then
@@ -1602,25 +1730,33 @@ function broadcastAnnouncement(text, actor, voiceLine)
 end
 
 function nextConfiguredAnnouncement()
+  if alarmAnnouncementSuppressionActive() then
+    return nil
+  end
+
   local lines = config.announcements and config.announcements.lines or {}
   if type(lines) ~= "table" or #lines == 0 then
     return nil
   end
 
-  state.announcements.index = (state.announcements.index or 0) + 1
-  if state.announcements.index > #lines then
-    state.announcements.index = 1
-  end
+  local announcements = config.announcements or {}
+  for _ = 1, #lines do
+    state.announcements.index = (state.announcements.index or 0) + 1
+    if state.announcements.index > #lines then
+      state.announcements.index = 1
+    end
 
-  local line = lines[state.announcements.index]
-  local variant = announcementVariation(line)
-  local context = eventAnnouncementContext("announcement", "Facility Announcement", "", "info", {})
-  local text = configuredAnnouncementText(line, variant)
-  local voiceLine = configuredAnnouncementVoice(line, variant)
-  if text then
-    return formatAnnouncementTemplate(text, context), voiceLine
+    local line = lines[state.announcements.index]
+    local variant = announcementVariation(line)
+    local context = eventAnnouncementContext("announcement", "Facility Announcement", "", "info", {})
+    local text = configuredAnnouncementText(line, variant)
+    local voiceLine = configuredAnnouncementVoice(line, variant)
+    if (not announcements.requireVoiceLine) or configuredAnnouncementHasAudio(line, variant, voiceLine) then
+      text = text or firstTextValue(type(variant) == "table" and variant.title or nil, type(line) == "table" and line.title or nil, "Facility announcement")
+      return formatAnnouncementTemplate(text, context), voiceLine
+    end
   end
-  return tostring(line), nil
+  return nil
 end
 
 function scheduleAnnouncementTimer()
@@ -2200,7 +2336,7 @@ function announcementFallbackSounds(announcement)
 end
 
 function announcementIsAlarmLike(announcement)
-  local kind = tostring((announcement and (announcement.kind or announcement.type)) or "")
+  local kind = announcementKindValue(announcement)
   return kind == "alarm" or kind == "emergency" or kind == "lockdown"
 end
 
@@ -2209,20 +2345,16 @@ function playFacilityAnnouncement(announcement)
   if announcements.enabled == false or announcements.sound == false then
     return false
   end
-  local alarmLike = announcementIsAlarmLike(announcement)
-  local allowDuringAlarm = alarmLike and announcements.alarmAnnouncements ~= false
-  if (state.alarm.active or alarmAudioBusy()) and not allowDuringAlarm then
+  local allowDuringAlarm = announcementCanPlayDuringAlarm(announcement) and announcements.alarmAnnouncements ~= false
+  if alarmAnnouncementSuppressionActive() and not allowDuringAlarm then
     return false
   end
   if announcementAudioBusy() then
-    if alarmLike then
+    if allowDuringAlarm then
       clearAnnouncementAudioStreams(true)
     else
       return false
     end
-  end
-  if allowDuringAlarm and alarmAudioBusy() then
-    clearAlarmAudioStreams(true)
   end
 
   local pcm = facilityAnnouncements.buildAnnouncementBuffer(announcement, announcements)

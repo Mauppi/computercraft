@@ -46,12 +46,13 @@ local function clamp(value)
   return value
 end
 
-local function appendSamples(buffer, samples)
+local function appendSamples(buffer, samples, gain)
   if type(samples) ~= "table" then
     return
   end
+  gain = tonumber(gain) or 1
   for index = 1, #samples do
-    buffer[#buffer + 1] = clamp(samples[index])
+    buffer[#buffer + 1] = clamp(samples[index] * gain)
   end
 end
 
@@ -62,6 +63,9 @@ local function mixSamplesAt(buffer, samples, startIndex, gain)
 
   startIndex = math.max(1, math.floor(tonumber(startIndex) or 1))
   gain = tonumber(gain) or 1
+  for index = #buffer + 1, startIndex - 1 do
+    buffer[index] = 0
+  end
   for index = 1, #samples do
     local target = startIndex + index - 1
     buffer[target] = clamp((buffer[target] or 0) + (samples[index] * gain))
@@ -154,11 +158,32 @@ local function resample(samples, fromRate, toRate)
   local out = {}
   local outCount = math.max(1, math.floor((#samples * toRate / fromRate) + 0.5))
   for index = 1, outCount do
-    local source = math.floor(((index - 1) * fromRate) / toRate) + 1
-    if source > #samples then
-      source = #samples
+    local source = ((index - 1) * fromRate / toRate) + 1
+    local left = math.floor(source)
+    local right = left + 1
+    if left < 1 then
+      left = 1
     end
-    out[index] = samples[source]
+    if right > #samples then
+      right = #samples
+    end
+    local fraction = source - left
+    out[index] = clamp((samples[left] or 0) + (((samples[right] or samples[left] or 0) - (samples[left] or 0)) * fraction))
+  end
+  return out
+end
+
+local function scaledSamples(samples, gain)
+  if type(samples) ~= "table" then
+    return nil
+  end
+  gain = tonumber(gain) or 1
+  if gain == 1 then
+    return samples
+  end
+  local out = {}
+  for index = 1, #samples do
+    out[index] = clamp(samples[index] * gain)
   end
   return out
 end
@@ -339,15 +364,19 @@ samplesFromSpec = function(spec, config, alarmLike)
     return nil
   end
 
-  if type(spec.pcm) == "table" then
-    return spec.pcm
+  if type(spec.pcm) == "table" or type(spec.samples) == "table" then
+    local samples = spec.pcm or spec.samples
+    if spec.sampleRate then
+      samples = resample(samples, spec.sampleRate, targetRate(config))
+    end
+    return scaledSamples(samples, spec.gain or spec.volume)
   end
 
   local wav = spec.wav or spec.file or spec.path
   if wav then
     local samples = M.loadWav(wav, config)
     if samples then
-      return samples
+      return scaledSamples(samples, spec.gain or spec.volume)
     end
   end
 
@@ -358,8 +387,10 @@ samplesFromSpec = function(spec, config, alarmLike)
     local defaultOverlap = secondsToSamples(spec.overlapSeconds or spec.overlap, config)
     for index, layer in ipairs(layers) do
       local layerSpec = layer
+      local layerGain = nil
       if type(layer) == "table" and (layer.sound or layer.spec or layer.source) then
         layerSpec = layer.sound or layer.spec or layer.source
+        layerGain = layer.gain or layer.volume
       end
 
       local samples = samplesFromSpec(layerSpec, config, alarmLike)
@@ -382,8 +413,7 @@ samplesFromSpec = function(spec, config, alarmLike)
           end
         end
 
-        local gain = type(layer) == "table" and (layer.gain or layer.volume) or nil
-        mixSamplesAt(buffer, samples, startIndex, gain)
+        mixSamplesAt(buffer, samples, startIndex, layerGain)
         cursor = math.max(cursor, startIndex + #samples)
       end
     end
@@ -399,7 +429,7 @@ samplesFromSpec = function(spec, config, alarmLike)
     for _, part in ipairs(parts) do
       local samples = samplesFromSpec(part, config, alarmLike)
       if overlap > 0 and #buffer > 0 then
-        mixSamplesAt(buffer, samples, math.max(1, #buffer - overlap + 1), type(part) == "table" and (part.gain or part.volume) or nil)
+        mixSamplesAt(buffer, samples, math.max(1, #buffer - overlap + 1))
       else
         appendSamples(buffer, samples)
       end
@@ -465,11 +495,16 @@ function M.buildAnnouncementBuffer(announcement, config)
   config = config or {}
   local alarmLike = isAlarmLike(announcement)
   local buffer = {}
+
+  local voice = configuredVoice(announcement, config, alarmLike)
+  if not voice and config.requireVoiceLine then
+    return buffer
+  end
+
   if config.jingle ~= false then
     appendSamples(buffer, configuredJingle(config, alarmLike))
   end
 
-  local voice = configuredVoice(announcement, config, alarmLike)
   if voice then
     appendSamples(buffer, voice)
   elseif config.voice ~= false then
@@ -482,9 +517,9 @@ end
 
 local function playbackChunkSamples(config)
   local audio = type(config and config.audio) == "table" and config.audio or {}
-  local samples = tonumber(audio.chunkSamples or audio.playbackSamples or config.chunkSamples or config.playbackSamples or config.maxSamples) or 128000
+  local samples = tonumber(audio.chunkSamples or audio.playbackSamples or config.chunkSamples or config.playbackSamples) or 24000
   if samples <= 0 then
-    samples = 128000
+    samples = 24000
   end
   samples = math.floor(samples)
   if samples < 1024 then
@@ -496,13 +531,33 @@ local function playbackChunkSamples(config)
   return samples
 end
 
-local function feedStream(stream)
+local function streamDone(stream)
   if stream.done then
+    return true
+  end
+  if stream.queueComplete then
+    local queuedUntil = tonumber(stream.queuedUntil) or os.clock()
+    local tailSeconds = tonumber(stream.tailSeconds) or 0.5
+    if os.clock() >= queuedUntil + tailSeconds then
+      stream.done = true
+      return true
+    end
+  end
+  return false
+end
+
+local function feedStream(stream)
+  if streamDone(stream) then
     return false
+  end
+  if stream.queueComplete then
+    return true
   end
 
   local acceptedAny = false
-  while stream.nextIndex <= #stream.pcm do
+  local fedChunks = 0
+  local maxChunks = math.max(1, tonumber(stream.maxChunksPerFeed) or 2)
+  while stream.nextIndex <= #stream.pcm and fedChunks < maxChunks do
     local chunk = {}
     local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
     for index = stream.nextIndex, last do
@@ -519,18 +574,26 @@ local function feedStream(stream)
       return acceptedAny
     end
 
+    local now = os.clock()
+    local queuedSamples = last - stream.nextIndex + 1
+    local sampleRate = math.max(1, tonumber(stream.sampleRate) or DEFAULT_SAMPLE_RATE)
+    local base = math.max(tonumber(stream.queuedUntil) or now, now)
+    stream.queuedUntil = base + (queuedSamples / sampleRate)
     stream.started = true
     acceptedAny = true
     stream.nextIndex = last + 1
+    fedChunks = fedChunks + 1
   end
 
-  stream.done = true
+  if stream.nextIndex > #stream.pcm then
+    stream.queueComplete = true
+  end
   return acceptedAny
 end
 
 local function streamsDone(streams)
   for _, stream in ipairs(streams) do
-    if not stream.done then
+    if not streamDone(stream) then
       return false
     end
   end
@@ -570,7 +633,9 @@ local function playPcmOnSpeakers(speakers, pcm, volume, config)
 
   local chunkSamples = playbackChunkSamples(config or {})
   local sampleRate = targetRate(config or {})
-  local graceSeconds = tonumber(config and config.streamGraceSeconds) or 6
+  local graceSeconds = tonumber(config and config.streamGraceSeconds) or 30
+  local tailSeconds = tonumber(config and config.tailSeconds) or 0.5
+  local maxChunksPerFeed = tonumber(config and config.maxChunksPerFeed) or 2
   local deadline = os.clock() + (#pcm / math.max(1, sampleRate)) + graceSeconds
   local streams = {}
   for _, speaker in ipairs(speakers or {}) do
@@ -581,6 +646,9 @@ local function playPcmOnSpeakers(speakers, pcm, volume, config)
         volume = volume,
         nextIndex = 1,
         chunkSamples = chunkSamples,
+        sampleRate = sampleRate,
+        tailSeconds = tailSeconds,
+        maxChunksPerFeed = maxChunksPerFeed,
       }
     end
   end

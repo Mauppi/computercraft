@@ -179,7 +179,8 @@ return {
   announcements = {
     enabled = true,
     sound = true,
-    voice = true,
+    voice = false,
+    requireVoiceLine = true,
     volume = 1,
     sampleRate = 48000,
     maxSamples = 128000,
@@ -319,7 +320,7 @@ return {
       slopday = { files = { "announcements/slopday.wav" } },
       slopday_cancelled = { files = { "announcements/slopdaycancelled.wav" } },
       slopday_slop = { files = { "announcements/slopdayslop.wav" } },
-      slopday_slop = { files = { "announcements/slopdaynonono.wav" } },
+      slopday_nonono = { files = { "announcements/slopdaynonono.wav" } },
     },
     jingles = {
       announcement = {

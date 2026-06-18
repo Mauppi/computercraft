@@ -182,7 +182,8 @@ return {
   announcements = {
     enabled = true,
     sound = true,
-    voice = true,
+    voice = false,
+    requireVoiceLine = true,
     volume = 1,
     sampleRate = 48000,
     maxSamples = 128000,
@@ -203,10 +204,7 @@ return {
       enabled = false,
       intervalSeconds = 900,
     },
-    lines = {
-      "Remember: report hazards before hazards report you.",
-      "Facility notice: keep badges visible in restricted areas.",
-    },
+    lines = {},
     eventAnnouncements = true,
     events = {
       alarm = {

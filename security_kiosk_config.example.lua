@@ -69,7 +69,8 @@ return {
   announcements = {
     enabled = true,
     sound = true,
-    voice = true,
+    voice = false,
+    requireVoiceLine = true,
     volume = 1,
     sampleRate = 48000,
     maxSamples = 128000,
