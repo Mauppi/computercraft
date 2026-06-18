@@ -377,9 +377,9 @@ function installKioskConfigIfMissing()
   handle.writeLine("  mode = \"kiosk\",")
   handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },")
   handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
-  handle.writeLine("  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.25 } },")
+  handle.writeLine("  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.5 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.05, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.1, idleWatchdogSeconds = 1, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
@@ -2622,6 +2622,7 @@ function announcementAudioConfig()
     volume = announcements.volume or audio.volume or 1,
     streamGraceSeconds = audio.streamGraceSeconds or announcements.streamGraceSeconds or 30,
     watchdogSeconds = audio.watchdogSeconds or announcements.watchdogSeconds or 0.1,
+    idleWatchdogSeconds = audio.idleWatchdogSeconds or announcements.idleWatchdogSeconds or 1,
     tailSeconds = audio.tailSeconds or announcements.tailSeconds or 0.5,
     maxChunksPerFeed = audio.maxChunksPerFeed or announcements.maxChunksPerFeed or 8,
     prebufferSeconds = audio.prebufferSeconds or announcements.prebufferSeconds or 2.5,
@@ -2870,6 +2871,27 @@ function feedAnnouncementAudioStreams()
   for _, name in ipairs(names) do
     announcementFeedSpeakerStream(name)
   end
+end
+
+function audioWatchdogDelaySeconds(audioConfig)
+  audioConfig = audioConfig or announcementAudioConfig()
+  local active = state.alarm.active or alarmAudioBusy() or announcementAudioBusy()
+  local seconds = active and tonumber(audioConfig.watchdogSeconds) or tonumber(audioConfig.idleWatchdogSeconds)
+  seconds = seconds or (active and 0.1 or 1)
+  if active then
+    if seconds < 0.05 then
+      seconds = 0.05
+    elseif seconds > 0.25 then
+      seconds = 0.25
+    end
+  else
+    if seconds < 0.25 then
+      seconds = 0.25
+    elseif seconds > 5 then
+      seconds = 5
+    end
+  end
+  return seconds
 end
 
 function handleAnnouncementSpeakerAudioEmpty(speakerName)
@@ -6209,12 +6231,30 @@ function monitorNames()
     return out
   end
 
+  local now = os.clock()
+  local scanSeconds = tonumber(config.monitors.scanSeconds or config.monitors.peripheralScanSeconds) or 15
+  if scanSeconds < 2 then
+    scanSeconds = 2
+  elseif scanSeconds > 120 then
+    scanSeconds = 120
+  end
+  if type(state.monitorNames) == "table" and tonumber(state.monitorNamesAt) and now - state.monitorNamesAt < scanSeconds then
+    return state.monitorNames
+  end
+
   for _, name in ipairs(peripheral.getNames()) do
     if hasPeripheralType(name, "monitor") then
       table.insert(out, name)
     end
   end
+  state.monitorNames = out
+  state.monitorNamesAt = now
   return out
+end
+
+function invalidateMonitorCache()
+  state.monitorNames = nil
+  state.monitorNamesAt = nil
 end
 
 function monitorDeviceConfig(name)
@@ -7936,22 +7976,23 @@ end
 
 function kioskAlarmSpeakerLoop()
   while state.kiosk.running do
-    local audioConfig = announcementAudioConfig()
-    local pumpSeconds = tonumber(audioConfig.watchdogSeconds) or 0.05
-    if pumpSeconds < 0.02 then
-      pumpSeconds = 0.02
-    elseif pumpSeconds > 0.2 then
-      pumpSeconds = 0.2
-    end
-    local sleepSeconds = pumpSeconds
+    local sleepSeconds = 0.5
     if state.alarm.active then
       local interval = tonumber(config.kiosk and config.kiosk.alarmSoundSeconds) or alarmProfile(state.alarm.profile).repeatSeconds or 1.5
       if alarmWaitingForStart() then
         state.kiosk.lastAlarmSound = 0
         sleepSeconds = math.max(0.01, math.min(0.05, alarmDelayUntilMillis(state.alarm.soundStartAt)))
-      elseif (not alarmAudioBusy()) and os.clock() - (state.kiosk.lastAlarmSound or 0) >= interval then
-        playAlarmPulse()
-        state.kiosk.lastAlarmSound = os.clock()
+      elseif alarmAudioBusy() then
+        sleepSeconds = 0.1
+      else
+        local elapsed = os.clock() - (state.kiosk.lastAlarmSound or 0)
+        if elapsed >= interval then
+          playAlarmPulse()
+          state.kiosk.lastAlarmSound = os.clock()
+          sleepSeconds = math.min(0.25, math.max(0.05, interval))
+        else
+          sleepSeconds = math.max(0.05, math.min(0.25, interval - elapsed))
+        end
       end
     else
       state.kiosk.lastAlarmSound = 0
@@ -7959,14 +8000,13 @@ function kioskAlarmSpeakerLoop()
         clearAlarmAudioStreams(not announcementAudioBusy())
       end
     end
-    feedAnnouncementAudioStreams()
     sleep(sleepSeconds)
   end
 end
 
 function alarmAudioStreamLoop()
   local audioConfig = announcementAudioConfig()
-  local watchdogSeconds = tonumber(audioConfig.watchdogSeconds) or 0.2
+  local watchdogSeconds = audioWatchdogDelaySeconds(audioConfig)
   local watchdogTimer = os.startTimer(watchdogSeconds)
   while state.running or state.kiosk.running do
     local event = { os.pullEventRaw() }
@@ -7977,10 +8017,7 @@ function alarmAudioStreamLoop()
     elseif event[1] == "timer" and event[2] == watchdogTimer then
       feedAnnouncementAudioStreams()
       audioConfig = announcementAudioConfig()
-      watchdogSeconds = tonumber(audioConfig.watchdogSeconds) or 0.2
-      if watchdogSeconds < 0.05 then
-        watchdogSeconds = 0.05
-      end
+      watchdogSeconds = audioWatchdogDelaySeconds(audioConfig)
       watchdogTimer = os.startTimer(watchdogSeconds)
     end
   end
@@ -7988,7 +8025,7 @@ end
 
 function kioskLocalControllerLoop()
   local options = kioskControllerOptions()
-  local pollSeconds = tonumber(options.pollSeconds) or 0.25
+  local pollSeconds = tonumber(options.pollSeconds) or 0.5
   local helloSeconds = tonumber(options.helloSeconds) or 30
   local pollTimer = os.startTimer(pollSeconds)
   local helloTimer = os.startTimer(1)
@@ -8002,7 +8039,7 @@ function kioskLocalControllerLoop()
         controllerPollLocalCredentials()
       end
       options = kioskControllerOptions()
-      pollSeconds = tonumber(options.pollSeconds) or 0.25
+      pollSeconds = tonumber(options.pollSeconds) or 0.5
       pollTimer = os.startTimer(pollSeconds)
     elseif name == "timer" and event[2] == helloTimer then
       if kioskControllerEnabled() then
@@ -8024,8 +8061,11 @@ function kioskLocalControllerLoop()
           meta = meta,
         })
       end
-    elseif (name == "peripheral" or name == "peripheral_detach") and kioskControllerEnabled() then
-      broadcastControllerHello()
+    elseif name == "peripheral" or name == "peripheral_detach" then
+      invalidateMonitorCache()
+      if kioskControllerEnabled() then
+        broadcastControllerHello()
+      end
     end
   end
 end
@@ -8494,7 +8534,7 @@ function saveKioskControllerSetting(enabled)
     config.kiosk.controller.credentialForwarding = true
   end
   if config.kiosk.controller.pollSeconds == nil then
-    config.kiosk.controller.pollSeconds = 0.25
+    config.kiosk.controller.pollSeconds = 0.5
   end
   if config.kiosk.controller.helloSeconds == nil then
     config.kiosk.controller.helloSeconds = 30
@@ -9317,6 +9357,7 @@ function eventLoop()
       checkEmergencyButtons()
       checkGlobalSensors()
     elseif name == "peripheral" or name == "peripheral_detach" then
+      invalidateMonitorCache()
       openRednet()
       markDirty()
     elseif name == "rednet_message" then
