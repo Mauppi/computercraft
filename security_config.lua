@@ -211,6 +211,7 @@ return {
       { voiceLine = "slopday_goon" },
       { voiceLine = "slopday_animals" },
       { voiceLine = "slopday_sloppingit" },
+      { voiceLine = "slopdaysus" },
     },
     eventAnnouncements = true,
     personnelTitles = {
@@ -533,6 +534,7 @@ return {
       slopday_goon = { files = { "announcements/slopdaygoon.wav" } },
       slopday_animals = { files = { "announcements/slopdayanimals.wav" } },
       slopday_sloppingit = { files = { "announcements/slopdaysloppingit.wav" } },
+      slopdaysus = { files = { "announcements/slopdaySuS.wav" } },
     },
     jingles = {
       announcement = {

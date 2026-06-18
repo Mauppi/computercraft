@@ -2195,6 +2195,34 @@ function broadcastAnnouncement(text, actor, voiceLine)
   return true
 end
 
+function randomAnnouncementLineIndices(lines)
+  local indices = {}
+  for index = 1, #(lines or {}) do
+    indices[index] = index
+  end
+
+  for index = #indices, 2, -1 do
+    local swap = math.random(index)
+    indices[index], indices[swap] = indices[swap], indices[index]
+  end
+  return indices
+end
+
+function announcementRandomOrder(lines)
+  state.announcements.randomLineCount = tonumber(state.announcements.randomLineCount) or 0
+  local order = state.announcements.randomOrder
+  if type(order) ~= "table" or #order == 0 or state.announcements.randomLineCount ~= #lines then
+    order = randomAnnouncementLineIndices(lines)
+    if #order > 1 and order[#order] == state.announcements.lastAutoLineIndex then
+      local swap = math.random(#order - 1)
+      order[#order], order[swap] = order[swap], order[#order]
+    end
+    state.announcements.randomOrder = order
+    state.announcements.randomLineCount = #lines
+  end
+  return order
+end
+
 function nextConfiguredAnnouncement()
   if alarmAnnouncementSuppressionActive() then
     return nil
@@ -2207,18 +2235,20 @@ function nextConfiguredAnnouncement()
 
   local announcements = config.announcements or {}
   for _ = 1, #lines do
-    state.announcements.index = (state.announcements.index or 0) + 1
-    if state.announcements.index > #lines then
-      state.announcements.index = 1
+    local order = announcementRandomOrder(lines)
+    local lineIndex = table.remove(order)
+    if not lineIndex then
+      return nil
     end
-
-    local line = lines[state.announcements.index]
+    local line = lines[lineIndex]
     local variant = announcementVariation(line)
     local context = eventAnnouncementContext("announcement", "Facility Announcement", "", "info", {})
     local text = configuredAnnouncementText(line, variant)
     local voiceLine = configuredAnnouncementVoice(line, variant)
     if (not announcements.requireVoiceLine) or configuredAnnouncementHasAudio(line, variant, voiceLine) then
       text = text or firstTextValue(type(variant) == "table" and variant.title or nil, type(line) == "table" and line.title or nil, "Facility announcement")
+      state.announcements.index = lineIndex
+      state.announcements.lastAutoLineIndex = lineIndex
       return formatAnnouncementTemplate(text, context), voiceLine
     end
   end

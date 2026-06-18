@@ -518,6 +518,15 @@ return {
       personnel_reason_meeting = { files = { "announcements/vo_for.wav", "announcements/vo_meeting.wav" } },
       personnel_reason_questioning = { files = { "announcements/vo_for.wav", "announcements/vo_questioning.wav" } },
       personnel_reason_security = { files = { "announcements/vo_for.wav", "announcements/vo_security.wav" } },
+      slopday = { files = { "announcements/slopday.wav" } },
+      slopday_cancelled = { files = { "announcements/slopdaycancelled.wav" } },
+      slopday_slop = { files = { "announcements/slopdayslop.wav" } },
+      slopday_nonono = { files = { "announcements/slopdaynonono.wav" } },
+      slopday_website = { files = { "announcements/slopdaywebsite.wav" } },
+      slopday_goon = { files = { "announcements/slopdaygoon.wav" } },
+      slopday_animals = { files = { "announcements/slopdayanimals.wav" } },
+      slopday_sloppingit = { files = { "announcements/slopdaysloppingit.wav" } },
+      slopdaysus = { files = { "announcements/slopdaySuS.wav" } },
     },
     jingles = {
       announcement = {
