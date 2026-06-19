@@ -615,6 +615,46 @@ local function streamDone(stream)
   return false
 end
 
+local function streamPrebufferSeconds(stream)
+  local seconds = tonumber(stream and stream.prebufferSeconds) or 2.5
+  if seconds < 0.25 then
+    return 0.25
+  end
+  if seconds > 8 then
+    return 8
+  end
+  return seconds
+end
+
+local function streamRefillSeconds(stream)
+  local prebufferSeconds = streamPrebufferSeconds(stream)
+  local seconds = tonumber(stream and stream.refillSeconds) or math.min(1, math.max(0.25, prebufferSeconds * 0.35))
+  if seconds < 0.1 then
+    return 0.1
+  end
+  if seconds > prebufferSeconds then
+    return prebufferSeconds
+  end
+  return seconds
+end
+
+local function pcmChunk(pcm, firstIndex, lastIndex, clampSamples)
+  local chunk = {}
+  local outIndex = 1
+  if clampSamples then
+    for index = firstIndex, lastIndex do
+      chunk[outIndex] = clamp(pcm[index])
+      outIndex = outIndex + 1
+    end
+  else
+    for index = firstIndex, lastIndex do
+      chunk[outIndex] = pcm[index]
+      outIndex = outIndex + 1
+    end
+  end
+  return chunk
+end
+
 local function feedStream(stream)
   if streamDone(stream) then
     return false
@@ -626,12 +666,14 @@ local function feedStream(stream)
   local acceptedAny = false
   local fedChunks = 0
   local maxChunks = math.max(1, tonumber(stream.maxChunksPerFeed) or 2)
+  local targetQueuedUntil = os.clock() + streamPrebufferSeconds(stream)
   while stream.nextIndex <= #stream.pcm and fedChunks < maxChunks do
-    local chunk = {}
-    local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
-    for index = stream.nextIndex, last do
-      chunk[#chunk + 1] = clamp(stream.pcm[index])
+    if fedChunks > 0 and stream.queuedUntil and stream.queuedUntil >= targetQueuedUntil then
+      break
     end
+
+    local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
+    local chunk = pcmChunk(stream.pcm, stream.nextIndex, last, stream.clampSamples)
 
     local ok, accepted = pcall(stream.speaker.playAudio, chunk, stream.volume)
     if not ok then
@@ -658,6 +700,31 @@ local function feedStream(stream)
     stream.queueComplete = true
   end
   return acceptedAny
+end
+
+local function nextStreamWaitSeconds(streams)
+  local now = os.clock()
+  local delay
+  for _, stream in ipairs(streams or {}) do
+    if not streamDone(stream) and not stream.queueComplete then
+      local streamDelay = 0.1
+      if stream.queuedUntil then
+        streamDelay = (tonumber(stream.queuedUntil) - now) - streamRefillSeconds(stream)
+      end
+      if streamDelay < 0.05 then
+        streamDelay = 0.05
+      end
+      if not delay or streamDelay < delay then
+        delay = streamDelay
+      end
+    end
+  end
+  if not delay then
+    delay = 0.25
+  elseif delay > 1 then
+    delay = 1
+  end
+  return delay
 end
 
 local function streamsDone(streams)
@@ -705,6 +772,9 @@ local function playPcmOnSpeakers(speakers, pcm, volume, config)
   local graceSeconds = tonumber(config and config.streamGraceSeconds) or 30
   local tailSeconds = tonumber(config and config.tailSeconds) or 0.5
   local maxChunksPerFeed = tonumber(config and config.maxChunksPerFeed) or 2
+  local prebufferSeconds = tonumber(config and config.prebufferSeconds) or 2.5
+  local refillSeconds = tonumber(config and config.refillSeconds) or 0.75
+  local clampSamples = config and config.clampPlaybackSamples == true
   local deadline = os.clock() + (#pcm / math.max(1, sampleRate)) + graceSeconds
   local streams = {}
   for _, speaker in ipairs(speakers or {}) do
@@ -718,6 +788,9 @@ local function playPcmOnSpeakers(speakers, pcm, volume, config)
         sampleRate = sampleRate,
         tailSeconds = tailSeconds,
         maxChunksPerFeed = maxChunksPerFeed,
+        prebufferSeconds = prebufferSeconds,
+        refillSeconds = refillSeconds,
+        clampSamples = clampSamples,
       }
     end
   end
@@ -737,7 +810,7 @@ local function playPcmOnSpeakers(speakers, pcm, volume, config)
     if os.clock() > deadline then
       break
     end
-    waitForSpeakerReady(0.05)
+    waitForSpeakerReady(nextStreamWaitSeconds(streams))
   end
 
   return startedCount(streams)

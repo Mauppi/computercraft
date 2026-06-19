@@ -58,6 +58,14 @@ Kiosks stay synced to the server alarm/lockdown state through rednet broadcasts 
 
 Logged-in kiosks auto-logout after `kiosk.autoLogoutSeconds` of no input. Logged-out kiosks reboot after `kiosk.autoRebootLoggedOutSeconds`, defaulting to 1800 seconds.
 
+## Polling And Idle Load
+
+The server splits periodic work into separate timers. `credentialPollSeconds` controls disk/RFID/NFC/player credential scans, `inputPollSeconds` controls door contacts, request-exit inputs, and emergency buttons, and `sensorPollSeconds` controls heavier facility sensor sweeps such as Create stress/power peripherals. `pollSeconds` remains a compatibility fallback for any of those values that are omitted.
+
+Redstone and Create stress events still wake the system promptly, but repeated event bursts are coalesced with `redstoneDebounceSeconds` and `stressDebounceSeconds`. Static monitor views redraw only when state changes; rotating, slideshow, and poster views keep using `monitors.refreshSeconds`.
+
+Kiosks that are not currently acting as door controllers use `kiosk.controller.idlePollSeconds` before checking local controller state again; standalone controller mode and enabled kiosk controllers use `kiosk.controller.pollSeconds`.
+
 ## Setup Wizard And Door Controllers
 
 Use the server console command `setup` after an admin `login <admin-pin>` to configure facility hardware from the terminal. The setup wizard can scan server peripherals, scan a remote door controller, add or update doors, remove doors, add/remove facility sensors, add/remove emergency buttons, add/remove generators, and map/remove reader sources. Each change is saved to `security_config.lua` immediately.
@@ -200,7 +208,9 @@ Admins can send a facility announcement from the server console:
 announce <message>
 ```
 
-Announcements are pushed to kiosks as real-time notifications. Kiosks with speakers stream a stitched `speaker.playAudio` buffer when available: jingle, optional WAV/PCM voice line segments, then generated PCM voice if no file-backed voice line is configured. Long jingles and voice lines are split into `announcements.chunkSamples` packets, default `128000`, and continue on `speaker_audio_empty` instead of cutting off after the first packet. Configure this under `announcements`; scheduled announcements can be enabled with `announcements.auto.enabled = true`.
+Announcements are pushed to kiosks as real-time notifications. Kiosks with speakers stream a stitched `speaker.playAudio` buffer when available: jingle, optional WAV/PCM voice line segments, then generated PCM voice if no file-backed voice line is configured. Long jingles and voice lines are split into `announcements.chunkSamples` packets and continue on `speaker_audio_empty` instead of cutting off after the first packet. Configure this under `announcements`; scheduled announcements can be enabled with `announcements.auto.enabled = true`.
+
+Normal announcements are queued while another announcement is still playing or alarm audio is active, then drained by the audio watchdog when the speakers are free. Use `announcements.queueLimit` to cap queued items. Alarm and emergency announcements can still interrupt existing announcement audio when `announcements.alarmAnnouncements` is enabled.
 
 Event and action announcements are configurable under `announcements.events` and `announcements.actions`. Each entry can use `variations` for random text, `voiceLine` for a configured WAV/PCM voice line, `chance` for probabilistic lines (`0.5` or `50` both mean 50%), and `cooldownSeconds` to avoid spam. Placeholders like `{facility}`, `{reason}`, `{actor}`, `{sensor}`, `{user}`, and `{action}` are replaced from the event or audit detail.
 
@@ -280,6 +290,10 @@ announcements = {
 ```
 
 WAV loading supports RIFF/WAVE PCM clips at 8-bit or 16-bit, mono or stereo. Clips are resampled to `announcements.sampleRate`, default `48000`, and mixed down to the signed 8-bit sample values expected by CC:Tweaked speakers. Keep stitched clips short enough for the configured `announcements.maxSamples`, default `128000`, or split long lines into shorter announcement segments.
+
+WAV playback streams in chunks and keeps a small queued buffer ahead of the speaker. Tune `announcements.chunkSamples`, `prebufferSeconds`, `refillSeconds`, `maxChunksPerFeed`, `watchdogSeconds`, and `idleWatchdogSeconds` if a computer is under load or speakers underrun. Alarm WAV profiles inherit these stream settings unless overridden under `alarm.audio` or the individual alarm profile.
+
+PA request announcements use the configured personnel role/title voice line first, then the person's name, the request phrase, the area, and the reason. Leave the kiosk role field blank to let the server infer the role from the employee record.
 
 Committed audio can also be listed explicitly in `security_system_manifest.lua` under `assets`, `audioFiles`, or `wavs`. Those entries are optional unless `required = true` is set.
 

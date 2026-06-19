@@ -206,12 +206,84 @@ local function playPcm(speaker, pcm, volume, audioConfig)
     return ok and accepted ~= false
   end
 
-  local chunk = {}
-  for index = 1, maxSamples do
-    chunk[index] = pcm[index]
+  local chunkSamples = tonumber(audioConfig and (audioConfig.chunkSamples or audioConfig.playbackSamples)) or maxSamples
+  if chunkSamples <= 0 then
+    chunkSamples = maxSamples
   end
-  local ok, accepted = pcall(speaker.playAudio, chunk, volume)
-  return ok and accepted ~= false
+  chunkSamples = math.floor(chunkSamples)
+  if chunkSamples < 1024 then
+    chunkSamples = 1024
+  elseif chunkSamples > 128000 then
+    chunkSamples = 128000
+  end
+
+  local sampleRate = tonumber(audioConfig and audioConfig.sampleRate) or 48000
+  if sampleRate <= 0 then
+    sampleRate = 48000
+  end
+  local tailSeconds = tonumber(audioConfig and audioConfig.tailSeconds) or 0.25
+  local graceSeconds = tonumber(audioConfig and audioConfig.streamGraceSeconds) or 10
+  local deadline = os.clock() + (#pcm / sampleRate) + graceSeconds
+  local nextIndex = 1
+  local queuedUntil = nil
+  local started = false
+
+  local function waitForSpeaker(seconds)
+    seconds = tonumber(seconds) or 0.25
+    if os and os.startTimer and (os.pullEventRaw or os.pullEvent) then
+      local pull = os.pullEventRaw or os.pullEvent
+      local timer = os.startTimer(seconds)
+      while true do
+        local event = { pull() }
+        if event[1] == "speaker_audio_empty" or (event[1] == "timer" and event[2] == timer) then
+          return
+        end
+      end
+    elseif sleep then
+      sleep(seconds)
+    end
+  end
+
+  while nextIndex <= #pcm and os.clock() <= deadline do
+    local last = math.min(#pcm, nextIndex + chunkSamples - 1)
+    local chunk = {}
+    local outIndex = 1
+    for index = nextIndex, last do
+      chunk[outIndex] = pcm[index]
+      outIndex = outIndex + 1
+    end
+
+    local ok, accepted = pcall(speaker.playAudio, chunk, volume)
+    if not ok then
+      return started
+    end
+    if accepted == false then
+      local waitSeconds = 0.25
+      if queuedUntil then
+        waitSeconds = (queuedUntil - os.clock()) - 0.25
+        if waitSeconds < 0.05 then
+          waitSeconds = 0.05
+        elseif waitSeconds > 1 then
+          waitSeconds = 1
+        end
+      end
+      waitForSpeaker(waitSeconds)
+    else
+      local now = os.clock()
+      local queuedSamples = last - nextIndex + 1
+      queuedUntil = math.max(queuedUntil or now, now) + (queuedSamples / sampleRate)
+      nextIndex = last + 1
+      started = true
+    end
+  end
+
+  if started and queuedUntil then
+    while os.clock() < queuedUntil + tailSeconds and os.clock() <= deadline do
+      waitForSpeaker(math.min(1, math.max(0.05, queuedUntil + tailSeconds - os.clock())))
+    end
+  end
+
+  return started
 end
 
 local function playNotificationWav(speaker, sounds, notifications)

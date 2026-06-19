@@ -34,6 +34,12 @@ local state = {
   running = true,
   doors = {},
   timers = {},
+  timerKeys = {},
+  peripheralCache = {
+    names = nil,
+    types = {},
+    methods = {},
+  },
   lastBadge = {},
   denied = {},
   sensors = {},
@@ -65,6 +71,7 @@ local state = {
   },
   announcements = {
     index = 0,
+    queue = {},
     cooldowns = {},
     audioStreams = {},
     audioGeneration = 0,
@@ -377,9 +384,9 @@ function installKioskConfigIfMissing()
   handle.writeLine("  mode = \"kiosk\",")
   handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },")
   handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
-  handle.writeLine("  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.5 } },")
+  handle.writeLine("  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.5, idlePollSeconds = 5 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.1, idleWatchdogSeconds = 1, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, alarmAnnouncements = true, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
@@ -757,7 +764,42 @@ function truncate(text, limit)
   return string.sub(text, 1, math.max(0, limit - 3)) .. "..."
 end
 
+function peripheralNames()
+  state.peripheralCache = state.peripheralCache or { types = {}, methods = {} }
+  if type(state.peripheralCache.names) == "table" then
+    return state.peripheralCache.names
+  end
+
+  local names = {}
+  if peripheral and peripheral.getNames then
+    for _, name in ipairs(peripheral.getNames()) do
+      table.insert(names, name)
+    end
+  end
+
+  state.peripheralCache.names = names
+  return names
+end
+
+function invalidatePeripheralCache()
+  state.peripheralCache = {
+    names = nil,
+    types = {},
+    methods = {},
+  }
+  if type(invalidateMonitorCache) == "function" then
+    invalidateMonitorCache()
+  end
+end
+
 function getTypes(name)
+  state.peripheralCache = state.peripheralCache or { types = {}, methods = {} }
+  state.peripheralCache.types = state.peripheralCache.types or {}
+  local cached = state.peripheralCache.types[name]
+  if cached then
+    return cached
+  end
+
   local types = { peripheral.getType(name) }
   local map = {}
   for _, item in ipairs(types) do
@@ -765,6 +807,7 @@ function getTypes(name)
       map[tostring(item)] = true
     end
   end
+  state.peripheralCache.types[name] = map
   return map
 end
 
@@ -774,6 +817,13 @@ function hasPeripheralType(name, wanted)
 end
 
 function methodMap(name)
+  state.peripheralCache = state.peripheralCache or { types = {}, methods = {} }
+  state.peripheralCache.methods = state.peripheralCache.methods or {}
+  local cached = state.peripheralCache.methods[name]
+  if cached then
+    return cached
+  end
+
   local ok, methods = pcall(peripheral.getMethods, name)
   local out = {}
   if ok and type(methods) == "table" then
@@ -781,6 +831,7 @@ function methodMap(name)
       out[method] = true
     end
   end
+  state.peripheralCache.methods[name] = out
   return out
 end
 
@@ -961,7 +1012,7 @@ function wrapEndpointPeripheral(name)
     wanted = "redstone_integrator"
   end
 
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     if string.lower(tostring(name)) == wanted or hasPeripheralType(name, wanted) then
       device = peripheral.wrap(name)
       if device then
@@ -1229,10 +1280,91 @@ function setDoorOpen(doorId, open)
   return setOutputListWithController(outputs, active, door.controller or door.computerId)
 end
 
+function normalizedSeconds(value, fallback, minSeconds, maxSeconds)
+  local seconds = tonumber(value)
+  if seconds == nil or seconds <= 0 then
+    seconds = tonumber(fallback) or 1
+  end
+  if minSeconds and seconds < minSeconds then
+    seconds = minSeconds
+  end
+  if maxSeconds and seconds > maxSeconds then
+    seconds = maxSeconds
+  end
+  return seconds
+end
+
+function credentialPollSeconds()
+  return normalizedSeconds(
+    config.credentialPollSeconds or config.badgePollSeconds or config.readerPollSeconds or config.pollSeconds,
+    1,
+    0.1
+  )
+end
+
+function inputPollSeconds()
+  return normalizedSeconds(config.inputPollSeconds or config.doorPollSeconds or config.pollSeconds, 1, 0.1)
+end
+
+function sensorPollSeconds()
+  local facility = config.facility or {}
+  return normalizedSeconds(
+    config.sensorPollSeconds or config.facilitySensorPollSeconds or facility.sensorPollSeconds or facility.pollSeconds,
+    config.pollSeconds or 1,
+    0.25
+  )
+end
+
+function redstoneDebounceSeconds()
+  local timers = config.updateTimers or config.timers or {}
+  return normalizedSeconds(timers.redstoneSeconds or config.redstoneDebounceSeconds, 0.05, 0.05, 1)
+end
+
+function stressDebounceSeconds()
+  local timers = config.updateTimers or config.timers or {}
+  return normalizedSeconds(timers.stressSeconds or config.stressDebounceSeconds, 0.2, 0.05, 2)
+end
+
+function monitorRefreshSeconds()
+  return normalizedSeconds(config.monitors and config.monitors.refreshSeconds, 2, 0.25)
+end
+
+function alarmBroadcastSeconds()
+  return normalizedSeconds(config.kiosk and config.kiosk.syncSeconds, 2, 0.25)
+end
+
 function scheduleTimer(seconds, payload)
+  seconds = tonumber(seconds)
+  if seconds == nil then
+    seconds = 1
+  elseif seconds < 0.05 then
+    seconds = 0.05
+  end
   local id = os.startTimer(seconds)
   state.timers[id] = payload
+  if payload and payload.key then
+    state.timerKeys[payload.key] = id
+  end
   return id
+end
+
+function scheduleKeyedTimer(key, seconds, payload)
+  if key and state.timerKeys[key] then
+    local existing = state.timerKeys[key]
+    if state.timers[existing] then
+      return existing
+    end
+    state.timerKeys[key] = nil
+  end
+  payload = payload or {}
+  payload.key = key
+  return scheduleTimer(seconds, payload)
+end
+
+function clearTimerKey(payload, id)
+  if payload and payload.key and state.timerKeys[payload.key] == id then
+    state.timerKeys[payload.key] = nil
+  end
 end
 
 function markDirty()
@@ -1267,7 +1399,7 @@ end
 
 function findSpeakers()
   local out = {}
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     if hasPeripheralType(name, "speaker") then
       local device = peripheral.wrap(name)
       if device then
@@ -1280,7 +1412,7 @@ end
 
 function findSpeakerEntries()
   local out = {}
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     if hasPeripheralType(name, "speaker") then
       local device = peripheral.wrap(name)
       if device then
@@ -1292,7 +1424,7 @@ function findSpeakerEntries()
 end
 
 function findChatBox()
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     local methods = methodMap(name)
     if methods.sendMessage then
       local device = peripheral.wrap(name)
@@ -1452,6 +1584,16 @@ function setNotificationScheduledStart(notification, startAt)
   notification.soundStartAt = startAt
   notification.announcementStartAt = startAt
   notification.playAtMillis = startAt
+end
+
+function clearNotificationScheduledStart(notification)
+  if type(notification) ~= "table" then
+    return
+  end
+  notification.soundStartAt = nil
+  notification.announcementStartAt = nil
+  notification.playAtMillis = nil
+  notification.startAtMillis = nil
 end
 
 function ensureNotificationPlaybackSchedule(notification)
@@ -1731,7 +1873,7 @@ end
 function personnelRequestFields(message, personnel)
   message = type(message) == "table" and message or {}
   local record = employeeRecordByName(personnel)
-  local rawRole = message.personnelRole or message.role or message.title or message.personnelTitle
+  local rawRole = firstTextValue(message.personnelRole, message.role, message.title, message.personnelTitle)
   rawRole = rawRole or (record and record.role) or personnelRoleFromText(personnel) or "employee"
 
   local roleKey = announcementKey(rawRole)
@@ -2465,12 +2607,18 @@ end
 
 function alarmAudioConfig(profile)
   local audio = type(profile.audio) == "table" and profile.audio or {}
+  local announcements = config.announcements or {}
   local dsp = profile.dsp or {}
   return {
     sampleRate = audio.sampleRate or profile.sampleRate or dsp.sampleRate or 48000,
     maxSamples = audio.maxSamples or profile.maxSamples or dsp.maxSamples or 128000,
     chunkSamples = audio.chunkSamples or profile.chunkSamples or audio.playbackSamples or profile.playbackSamples or 128000,
     loopGapSeconds = audio.loopGapSeconds or profile.loopGapSeconds or 0.05,
+    streamGraceSeconds = audio.streamGraceSeconds or profile.streamGraceSeconds or announcements.streamGraceSeconds or 30,
+    tailSeconds = audio.tailSeconds or profile.tailSeconds or announcements.tailSeconds or 0.5,
+    maxChunksPerFeed = audio.maxChunksPerFeed or profile.maxChunksPerFeed or announcements.maxChunksPerFeed or 4,
+    prebufferSeconds = audio.prebufferSeconds or profile.prebufferSeconds or announcements.prebufferSeconds or 2.5,
+    refillSeconds = audio.refillSeconds or profile.refillSeconds or announcements.refillSeconds or 0.75,
     syncToleranceSeconds = audio.syncToleranceSeconds or profile.syncToleranceSeconds or 0.08,
     syncSkipLate = audio.syncSkipLate ~= false and profile.syncSkipLate ~= false,
   }
@@ -2611,7 +2759,11 @@ function pruneAlarmAudioStreams()
   state.alarm.audioStreams = state.alarm.audioStreams or {}
   local now = os.clock()
   for name, stream in pairs(state.alarm.audioStreams) do
-    if not state.alarm.active or stream.generation ~= state.alarm.audioGeneration or (stream.deadline and now > stream.deadline) then
+    local queuedUntil = tonumber(stream.queuedUntil)
+    local tailSeconds = tonumber(stream.tailSeconds) or 0.5
+    local queueFinished = stream.queueComplete and queuedUntil and now >= queuedUntil + tailSeconds
+    local expired = stream.deadline and now > stream.deadline
+    if not state.alarm.active or stream.generation ~= state.alarm.audioGeneration or queueFinished or expired then
       state.alarm.audioStreams[name] = nil
     end
   end
@@ -2642,6 +2794,46 @@ function clearAlarmAudioStreams(stopSpeakers)
   end
 end
 
+function streamPrebufferSeconds(stream)
+  local seconds = tonumber(stream and stream.prebufferSeconds) or 2.5
+  if seconds < 0.25 then
+    return 0.25
+  end
+  if seconds > 8 then
+    return 8
+  end
+  return seconds
+end
+
+function streamRefillSeconds(stream)
+  local prebufferSeconds = streamPrebufferSeconds(stream)
+  local seconds = tonumber(stream and stream.refillSeconds) or math.min(1, math.max(0.25, prebufferSeconds * 0.35))
+  if seconds < 0.1 then
+    return 0.1
+  end
+  if seconds > prebufferSeconds then
+    return prebufferSeconds
+  end
+  return seconds
+end
+
+function pcmChunk(pcm, firstIndex, lastIndex, clampSamples)
+  local chunk = {}
+  local outIndex = 1
+  if clampSamples then
+    for index = firstIndex, lastIndex do
+      chunk[outIndex] = clampSample(pcm[index])
+      outIndex = outIndex + 1
+    end
+  else
+    for index = firstIndex, lastIndex do
+      chunk[outIndex] = pcm[index]
+      outIndex = outIndex + 1
+    end
+  end
+  return chunk
+end
+
 function alarmFeedSpeakerStream(speakerName)
   local stream = state.alarm.audioStreams and state.alarm.audioStreams[speakerName]
   if not stream then
@@ -2655,31 +2847,72 @@ function alarmFeedSpeakerStream(speakerName)
     state.alarm.audioStreams[speakerName] = nil
     return false
   end
-  while stream.nextIndex <= #stream.pcm do
-    local chunk = {}
-    local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
-    for index = stream.nextIndex, last do
-      chunk[#chunk + 1] = clampSample(stream.pcm[index])
+
+  if stream.queueComplete then
+    local queuedUntil = tonumber(stream.queuedUntil) or os.clock()
+    if os.clock() >= queuedUntil + (tonumber(stream.tailSeconds) or 0.5) then
+      state.alarm.audioStreams[speakerName] = nil
+      return false
+    end
+    return true
+  end
+
+  local fedChunks = 0
+  local maxChunks = math.max(1, tonumber(stream.maxChunksPerFeed) or 2)
+  local targetQueuedUntil = os.clock() + streamPrebufferSeconds(stream)
+  while stream.nextIndex <= #stream.pcm and fedChunks < maxChunks do
+    if fedChunks > 0 and stream.queuedUntil and stream.queuedUntil >= targetQueuedUntil then
+      break
     end
 
+    local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
+    local chunk = pcmChunk(stream.pcm, stream.nextIndex, last, stream.clampSamples)
+
+    stream.lastAttemptAt = os.clock()
     local ok, accepted = pcall(stream.speaker.playAudio, chunk, stream.volume)
     if not ok then
       state.alarm.audioStreams[speakerName] = nil
       return false
     end
     if accepted == false then
-      return false
+      local graceSeconds = tonumber(stream.graceSeconds) or 30
+      if stream.queuedUntil then
+        stream.deadline = math.max(tonumber(stream.deadline) or 0, stream.queuedUntil + graceSeconds)
+      else
+        stream.deadline = math.max(tonumber(stream.deadline) or 0, os.clock() + graceSeconds)
+      end
+      return true
     end
 
-    stream.startedPlaybackAt = stream.startedPlaybackAt or os.clock()
+    local now = os.clock()
+    local queuedSamples = last - stream.nextIndex + 1
+    local sampleRate = math.max(1, tonumber(stream.sampleRate) or 48000)
+    local base = math.max(tonumber(stream.queuedUntil) or now, now)
+    stream.queuedUntil = base + (queuedSamples / sampleRate)
+    stream.acceptedSamples = (tonumber(stream.acceptedSamples) or 0) + queuedSamples
+    stream.startedPlaybackAt = stream.startedPlaybackAt or now
     stream.nextIndex = last + 1
-    stream.lastQueuedAt = os.clock()
-    state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, stream.startedPlaybackAt + (#stream.pcm / stream.sampleRate))
-    stream.deadline = math.max(tonumber(stream.deadline) or 0, (tonumber(state.alarm.audioPlayingUntil) or os.clock()) + 5)
+    stream.lastQueuedAt = now
+    stream.deadline = stream.queuedUntil + (tonumber(stream.graceSeconds) or 30)
+    state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, stream.queuedUntil)
+    fedChunks = fedChunks + 1
   end
 
-  state.alarm.audioStreams[speakerName] = nil
+  if stream.nextIndex > #stream.pcm then
+    stream.queueComplete = true
+    stream.deadline = math.max(tonumber(stream.deadline) or 0, (tonumber(stream.queuedUntil) or os.clock()) + (tonumber(stream.graceSeconds) or 30))
+  end
   return true
+end
+
+function feedAlarmAudioStreams()
+  local names = {}
+  for name in pairs(state.alarm.audioStreams or {}) do
+    table.insert(names, name)
+  end
+  for _, name in ipairs(names) do
+    alarmFeedSpeakerStream(name)
+  end
 end
 
 function handleAlarmSpeakerAudioEmpty(speakerName)
@@ -2702,15 +2935,15 @@ function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume)
   end
   local chunkSamples = alarmPlaybackChunkSize(profile)
   local duration = alarmPcmDuration(profile, pcm)
-  state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, os.clock() + duration)
+  local graceSeconds = tonumber(audioConfig.streamGraceSeconds) or 30
 
   if speakerName == "" then
-    local chunk = {}
     local last = math.min(#pcm, chunkSamples)
-    for index = 1, last do
-      chunk[index] = clampSample(pcm[index])
-    end
+    local chunk = pcmChunk(pcm, 1, last, false)
     local ok, accepted = pcall(speaker.playAudio, chunk, volume)
+    if ok and accepted ~= false then
+      state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, os.clock() + (last / sampleRate))
+    end
     return ok and accepted ~= false
   end
 
@@ -2724,7 +2957,13 @@ function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume)
     chunkSamples = chunkSamples,
     sampleRate = sampleRate,
     generation = state.alarm.audioGeneration or 0,
-    deadline = os.clock() + duration + 5,
+    deadline = os.clock() + duration + graceSeconds,
+    graceSeconds = graceSeconds,
+    tailSeconds = tonumber(audioConfig.tailSeconds) or 0.5,
+    maxChunksPerFeed = tonumber(audioConfig.maxChunksPerFeed) or 4,
+    prebufferSeconds = tonumber(audioConfig.prebufferSeconds) or 2.5,
+    refillSeconds = tonumber(audioConfig.refillSeconds) or 0.75,
+    clampSamples = false,
   }
 
   local queued = alarmFeedSpeakerStream(speakerName)
@@ -2759,6 +2998,7 @@ function announcementAudioConfig()
     tailSeconds = audio.tailSeconds or announcements.tailSeconds or 0.5,
     maxChunksPerFeed = audio.maxChunksPerFeed or announcements.maxChunksPerFeed or 8,
     prebufferSeconds = audio.prebufferSeconds or announcements.prebufferSeconds or 2.5,
+    refillSeconds = audio.refillSeconds or announcements.refillSeconds or 0.75,
     syncLeadSeconds = audio.syncLeadSeconds or announcements.syncLeadSeconds or 1.5,
     syncToleranceSeconds = audio.syncToleranceSeconds or announcements.syncToleranceSeconds or 0.08,
     syncSkipLate = audio.syncSkipLate ~= false and announcements.syncSkipLate ~= false,
@@ -2793,7 +3033,6 @@ function alignAnnouncementPcmToSchedule(pcm, startAt, audioConfig)
 
   local delaySeconds = alarmDelayUntilMillis(startAt)
   if delaySeconds > 0 then
-    sleep(delaySeconds)
     return pcm
   end
 
@@ -2933,6 +3172,28 @@ function announcementFeedSpeakerStream(speakerName)
     return false
   end
 
+  local startAtMillis = tonumber(stream.startAtMillis)
+  if startAtMillis and nowMillis() < startAtMillis then
+    stream.deadline = math.max(tonumber(stream.deadline) or 0, os.clock() + alarmDelayUntilMillis(startAtMillis) + (tonumber(stream.graceSeconds) or 30))
+    return true
+  end
+
+  if startAtMillis and not stream.started then
+    local lateSeconds = (nowMillis() - startAtMillis) / 1000
+    local toleranceSeconds = tonumber(stream.syncToleranceSeconds) or 0.08
+    if lateSeconds > math.max(0, toleranceSeconds) and stream.syncSkipLate ~= false then
+      local sampleRate = math.max(1, tonumber(stream.sampleRate) or 48000)
+      local trimmed = trimPcmStart(stream.pcm, math.floor((lateSeconds * sampleRate) + 0.5))
+      if not (type(trimmed) == "table" and #trimmed > 0) then
+        state.announcements.audioStreams[speakerName] = nil
+        return false
+      end
+      stream.pcm = trimmed
+      stream.nextIndex = 1
+    end
+    stream.startAtMillis = nil
+  end
+
   if stream.queueComplete then
     local queuedUntil = tonumber(stream.queuedUntil) or os.clock()
     if os.clock() >= queuedUntil + (tonumber(stream.tailSeconds) or 0.5) then
@@ -2944,21 +3205,14 @@ function announcementFeedSpeakerStream(speakerName)
 
   local fedChunks = 0
   local maxChunks = math.max(1, tonumber(stream.maxChunksPerFeed) or 2)
-  local prebufferSeconds = tonumber(stream.prebufferSeconds) or 2.5
-  if prebufferSeconds < 0.25 then
-    prebufferSeconds = 0.25
-  end
-  local targetQueuedUntil = os.clock() + prebufferSeconds
+  local targetQueuedUntil = os.clock() + streamPrebufferSeconds(stream)
   while stream.nextIndex <= #stream.pcm and fedChunks < maxChunks do
     if fedChunks > 0 and stream.queuedUntil and stream.queuedUntil >= targetQueuedUntil then
       break
     end
 
-    local chunk = {}
     local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
-    for index = stream.nextIndex, last do
-      chunk[#chunk + 1] = clampSample(stream.pcm[index])
-    end
+    local chunk = pcmChunk(stream.pcm, stream.nextIndex, last, stream.clampSamples)
 
     stream.lastAttemptAt = os.clock()
     local ok, accepted = pcall(stream.speaker.playAudio, chunk, stream.volume)
@@ -2982,6 +3236,7 @@ function announcementFeedSpeakerStream(speakerName)
     local base = math.max(tonumber(stream.queuedUntil) or now, now)
     stream.queuedUntil = base + (queuedSamples / sampleRate)
     stream.acceptedSamples = (tonumber(stream.acceptedSamples) or 0) + queuedSamples
+    stream.started = true
     stream.nextIndex = last + 1
     stream.lastQueuedAt = now
     stream.deadline = stream.queuedUntil + (tonumber(stream.graceSeconds) or 30)
@@ -3006,16 +3261,59 @@ function feedAnnouncementAudioStreams()
   end
 end
 
+function nextAudioStreamFeedDelay()
+  local now = os.clock()
+  local nextDelay = nil
+
+  local function consider(streams)
+    for _, stream in pairs(streams or {}) do
+      if not stream.queueComplete then
+        local delay = 0.1
+        local startAtMillis = tonumber(stream.startAtMillis)
+        if startAtMillis and nowMillis() < startAtMillis then
+          delay = alarmDelayUntilMillis(startAtMillis)
+        elseif stream.queuedUntil then
+          delay = (tonumber(stream.queuedUntil) - now) - streamRefillSeconds(stream)
+        else
+          delay = 0.1
+        end
+        if delay < 0.05 then
+          delay = 0.05
+        end
+        if not nextDelay or delay < nextDelay then
+          nextDelay = delay
+        end
+      end
+    end
+  end
+
+  consider(state.alarm.audioStreams)
+  consider(state.announcements.audioStreams)
+  if nextDelay and nextDelay > 1 then
+    nextDelay = 1
+  end
+  return nextDelay
+end
+
 function audioWatchdogDelaySeconds(audioConfig)
   audioConfig = audioConfig or announcementAudioConfig()
-  local active = state.alarm.active or alarmAudioBusy() or announcementAudioBusy()
+  local alarmBusy = alarmAudioBusy()
+  local announcementBusy = announcementAudioBusy()
+  local active = state.alarm.active or alarmBusy or announcementBusy
+  local streamDelay = nextAudioStreamFeedDelay()
+  if streamDelay then
+    return streamDelay
+  end
+  if state.announcements.queue and #state.announcements.queue > 0 then
+    return 0.1
+  end
   local seconds = active and tonumber(audioConfig.watchdogSeconds) or tonumber(audioConfig.idleWatchdogSeconds)
   seconds = seconds or (active and 0.1 or 1)
   if active then
     if seconds < 0.05 then
       seconds = 0.05
-    elseif seconds > 0.25 then
-      seconds = 0.25
+    elseif seconds > 1 then
+      seconds = 1
     end
   else
     if seconds < 0.25 then
@@ -3063,6 +3361,11 @@ function startAnnouncementAudioStream(speakerName, speaker, pcm, volume, options
     tailSeconds = tonumber(audioConfig.tailSeconds) or 0.5,
     maxChunksPerFeed = tonumber(audioConfig.maxChunksPerFeed) or 8,
     prebufferSeconds = tonumber(audioConfig.prebufferSeconds) or 2.5,
+    refillSeconds = tonumber(audioConfig.refillSeconds) or 0.75,
+    syncToleranceSeconds = tonumber(audioConfig.syncToleranceSeconds) or 0.08,
+    syncSkipLate = audioConfig.syncSkipLate ~= false,
+    startAtMillis = options.startAtMillis,
+    clampSamples = false,
     allowDuringAlarm = options.allowDuringAlarm and true or false,
   }
 
@@ -3087,8 +3390,38 @@ function announcementIsAlarmLike(announcement)
   return kind == "alarm" or kind == "emergency" or kind == "lockdown"
 end
 
-function playFacilityAnnouncement(announcement)
-  local announcements = config.announcements or {}
+function announcementQueueLimit()
+  local announcements = config and config.announcements or {}
+  local limit = tonumber(announcements.queueLimit or announcements.maxQueue or announcements.maxQueued)
+  if not limit or limit < 1 then
+    return 12
+  end
+  return math.floor(limit)
+end
+
+function queueFacilityAnnouncement(announcement)
+  if type(announcement) ~= "table" then
+    return false
+  end
+  local announcements = config and config.announcements or {}
+  if announcements.queue == false or announcements.queueEnabled == false then
+    return false
+  end
+
+  state.announcements.queue = state.announcements.queue or {}
+  local queued = shallowCopy(announcement)
+  queued.queuedAtMillis = queued.queuedAtMillis or nowMillis()
+  table.insert(state.announcements.queue, queued)
+
+  local limit = announcementQueueLimit()
+  while #state.announcements.queue > limit do
+    table.remove(state.announcements.queue, 1)
+  end
+  return true
+end
+
+function announcementCanStartNow(announcement)
+  local announcements = config and config.announcements or {}
   if announcements.enabled == false or announcements.sound == false then
     return false
   end
@@ -3096,9 +3429,50 @@ function playFacilityAnnouncement(announcement)
   if alarmAnnouncementSuppressionActive() and not allowDuringAlarm then
     return false
   end
+  return true
+end
+
+function processAnnouncementQueue()
+  state.announcements.queue = state.announcements.queue or {}
+  if #state.announcements.queue == 0 or announcementAudioBusy() then
+    return false
+  end
+
+  local index = 1
+  while index <= #state.announcements.queue do
+    local queued = state.announcements.queue[index]
+    if announcementCanStartNow(queued) then
+      table.remove(state.announcements.queue, index)
+      clearNotificationScheduledStart(queued)
+      if playFacilityAnnouncement(queued, { fromQueue = true }) then
+        return true
+      end
+    else
+      index = index + 1
+    end
+  end
+
+  return false
+end
+
+function playFacilityAnnouncement(announcement, options)
+  options = options or {}
+  local announcements = config.announcements or {}
+  if announcements.enabled == false or announcements.sound == false then
+    return false
+  end
+  local allowDuringAlarm = announcementCanPlayDuringAlarm(announcement) and announcements.alarmAnnouncements ~= false
+  if alarmAnnouncementSuppressionActive() and not allowDuringAlarm then
+    if not options.fromQueue then
+      return queueFacilityAnnouncement(announcement)
+    end
+    return false
+  end
   if announcementAudioBusy() then
     if allowDuringAlarm then
       clearAnnouncementAudioStreams(true)
+    elseif not options.fromQueue then
+      return queueFacilityAnnouncement(announcement)
     else
       return false
     end
@@ -3109,7 +3483,8 @@ function playFacilityAnnouncement(announcement)
     return false
   end
   local audioConfig = announcementAudioConfig()
-  pcm = alignAnnouncementPcmToSchedule(pcm, scheduledAnnouncementStartMillis(announcement), audioConfig)
+  local startAtMillis = scheduledAnnouncementStartMillis(announcement)
+  pcm = alignAnnouncementPcmToSchedule(pcm, startAtMillis, audioConfig)
   if not (type(pcm) == "table" and #pcm > 0) then
     return false
   end
@@ -3122,7 +3497,7 @@ function playFacilityAnnouncement(announcement)
   local generation = state.announcements.audioGeneration or 0
   if type(pcm) == "table" and #pcm > 0 then
     for _, entry in ipairs(findSpeakerEntries()) do
-      if startAnnouncementAudioStream(entry.name, entry.speaker, pcm, volume, { allowExisting = true, allowDuringAlarm = allowDuringAlarm, generation = generation }) then
+      if startAnnouncementAudioStream(entry.name, entry.speaker, pcm, volume, { allowExisting = true, allowDuringAlarm = allowDuringAlarm, generation = generation, startAtMillis = startAtMillis }) then
         played = true
       end
     end
@@ -3691,7 +4066,7 @@ function driveNames()
   local out = {}
   local seen = {}
 
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     if isDrive(name) then
       table.insert(out, name)
       seen[name] = true
@@ -3741,7 +4116,7 @@ function badgeWriterNames()
     return out
   end
 
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     local methods = methodMap(name)
     local looksLikeNfc = hasPeripheralType(name, "nfc_reader") or hasPeripheralType(name, "nfc_writer") or hasPeripheralType(name, "nfc")
     for _, method in ipairs(nfcWriteMethods) do
@@ -4018,7 +4393,7 @@ function scanRfidScannerCredentials()
     return nil
   end
 
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     if hasPeripheralType(name, "rfid_scanner") then
       local device = peripheral.wrap(name)
       if device and device.scan then
@@ -4050,7 +4425,7 @@ function scanGenericBadgeCredentials()
     return nil
   end
 
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     if not isDrive(name) then
       local methods = methodMap(name)
       for _, method in ipairs(genericBadgeMethods) do
@@ -4084,7 +4459,7 @@ function scanGenericBadgeCredentials()
 end
 
 function pollGenericBadgeReaders()
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     if not isDrive(name) then
       local methods = methodMap(name)
       for _, method in ipairs(genericBadgeMethods) do
@@ -4109,7 +4484,7 @@ function pollGenericBadgeReaders()
 end
 
 function pollRfidScanners()
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     if hasPeripheralType(name, "rfid_scanner") then
       local device = peripheral.wrap(name)
       if device and device.scan then
@@ -4169,7 +4544,7 @@ function playerListFromDetector(name)
 end
 
 function pollPlayerDetectors()
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     if isPlayerDetector(name) then
       for _, playerName in ipairs(playerListFromDetector(name)) do
         local candidates = {
@@ -4470,39 +4845,72 @@ function configuredFacilitySensors()
   return out
 end
 
-function checkConfiguredFacilitySensors()
+function facilitySensorUsesCreateStress(sensor)
+  if type(sensor) ~= "table" then
+    return false
+  end
+
+  local sensorType = sensor.type or sensor.kind
+  return sensorType == "create_stress" or sensorType == "create_power" or sensorType == "stressometer"
+end
+
+function facilitySensorUsesRedstoneInput(sensor)
+  if type(sensor) ~= "table" then
+    return true
+  end
+
+  local sensorType = sensor.type or sensor.kind
+  if facilitySensorUsesCreateStress(sensor) or sensorType == "create_speed" or sensorType == "speedometer" then
+    return false
+  end
+  if sensorType == "peripheral" or sensorType == "generic" or sensor.method then
+    return false
+  end
+
+  return sensor.input ~= nil
+    or sensor.side ~= nil
+    or sensor.peripheral ~= nil
+    or sensor.relay ~= nil
+    or sensor.redstoneRelay ~= nil
+    or sensor.integrator ~= nil
+    or sensor.device ~= nil
+end
+
+function checkConfiguredFacilitySensors(filterFn)
   if config.facility and config.facility.enabled == false then
     return
   end
 
   for index, sensor in ipairs(configuredFacilitySensors()) do
-    local key = "sensor:" .. tostring(sensor.id or sensor.name or sensor.peripheral or index)
-    local triggered, detail = readFacilitySensor(sensor)
+    if not filterFn or filterFn(sensor, index) then
+      local key = "sensor:" .. tostring(sensor.id or sensor.name or sensor.peripheral or index)
+      local triggered, detail = readFacilitySensor(sensor)
 
-    if triggered ~= nil then
-      state.sensorDetails[key] = detail
+      if triggered ~= nil then
+        state.sensorDetails[key] = detail
 
-      if triggered and sensor.outputs then
-        setOutputList(sensor.outputs, true)
-      elseif not triggered and sensor.outputs then
-        setOutputList(sensor.outputs, false)
+        if triggered and sensor.outputs then
+          setOutputList(sensor.outputs, true)
+        elseif not triggered and sensor.outputs then
+          setOutputList(sensor.outputs, false)
+        end
+
+        if triggered and not state.sensors[key] then
+          raiseAlarm(sensorReason(sensor, detail), nil, sensor.actor or "facility_sensor", sensorProfile(sensor))
+          audit("SENSOR_FAULT", {
+            sensor = sensor.name or sensor.peripheral or index,
+            profile = sensorProfile(sensor),
+            detail = detail,
+          })
+        elseif not triggered and state.sensors[key] then
+          audit("SENSOR_CLEAR", {
+            sensor = sensor.name or sensor.peripheral or index,
+            detail = detail,
+          })
+        end
+
+        state.sensors[key] = triggered
       end
-
-      if triggered and not state.sensors[key] then
-        raiseAlarm(sensorReason(sensor, detail), nil, sensor.actor or "facility_sensor", sensorProfile(sensor))
-        audit("SENSOR_FAULT", {
-          sensor = sensor.name or sensor.peripheral or index,
-          profile = sensorProfile(sensor),
-          detail = detail,
-        })
-      elseif not triggered and state.sensors[key] then
-        audit("SENSOR_CLEAR", {
-          sensor = sensor.name or sensor.peripheral or index,
-          detail = detail,
-        })
-      end
-
-      state.sensors[key] = triggered
     end
   end
 end
@@ -4512,7 +4920,7 @@ function checkAutoCreateStressSensors()
     return
   end
 
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     local methods = methodMap(name)
     local looksLikeStressometer = methods.getStress and methods.getStressCapacity
     local looksLikeAvionicsKinetic = methods.getNetworkId and methods.getStressImpact and methods.getStressContribution
@@ -4546,14 +4954,35 @@ function checkGlobalSensors()
   checkAutoCreateStressSensors()
 end
 
-function pollInputs()
+function checkRedstoneFacilitySensors()
+  checkConfiguredFacilitySensors(facilitySensorUsesRedstoneInput)
+end
+
+function checkStressSensors()
+  checkConfiguredFacilitySensors(facilitySensorUsesCreateStress)
+  checkAutoCreateStressSensors()
+end
+
+function pollCredentials()
   pollDiskDrives()
   pollRfidScanners()
   pollGenericBadgeReaders()
   pollPlayerDetectors()
+end
+
+function pollDoorInputs()
   checkDoorSensors()
   checkEmergencyButtons()
+end
+
+function pollFacilitySensors()
   checkGlobalSensors()
+end
+
+function pollInputs()
+  pollCredentials()
+  pollDoorInputs()
+  pollFacilitySensors()
 end
 
 function openRednet()
@@ -4561,7 +4990,7 @@ function openRednet()
     return
   end
 
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     if hasPeripheralType(name, "modem") then
       local okOpen = true
       if rednet.isOpen then
@@ -4625,7 +5054,7 @@ function peripheralSummary()
     return out
   end
 
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     local types = { peripheral.getType(name) }
     local methods = {}
     local methodSet = methodMap(name)
@@ -4670,6 +5099,19 @@ end
 function kioskControllerCredentialForwarding()
   local options = kioskControllerOptions()
   return kioskControllerEnabled() and options.credentialForwarding ~= false
+end
+
+function controllerModeActive()
+  local mode = string.lower(tostring(config and config.mode or ""))
+  return mode == "controller" or mode == "door" or mode == "door_controller"
+end
+
+function controllerPollSeconds()
+  local options = kioskControllerOptions()
+  if not controllerModeActive() and not kioskControllerEnabled() then
+    return normalizedSeconds(options.idlePollSeconds or config.controllerIdlePollSeconds, 5, 0.5)
+  end
+  return normalizedSeconds(options.pollSeconds or config.controllerPollSeconds, 0.5, 0.1)
 end
 
 function kioskControllerId()
@@ -6375,7 +6817,7 @@ function monitorNames()
     return state.monitorNames
   end
 
-  for _, name in ipairs(peripheral.getNames()) do
+  for _, name in ipairs(peripheralNames()) do
     if hasPeripheralType(name, "monitor") then
       table.insert(out, name)
     end
@@ -6916,6 +7358,41 @@ function monitorViewFor(name, deviceConfig)
     return tostring(views[index])
   end
   return view
+end
+
+function monitorViewNeedsPeriodicRedraw(view)
+  view = tostring(view or "")
+  return view == "cycle"
+    or view == "rotate"
+    or view == "slideshow"
+    or view == "posters"
+    or view == "poster"
+    or view == "propaganda"
+end
+
+function monitorsNeedPeriodicRedraw()
+  local monitors = config.monitors or {}
+  if monitors.alwaysRedraw then
+    return true
+  end
+  if monitorViewNeedsPeriodicRedraw(monitors.defaultView) then
+    return true
+  end
+
+  local devices = monitors.devices or monitors.monitors or {}
+  if type(devices) == "table" then
+    for _, device in pairs(devices) do
+      local view = device
+      if type(device) == "table" then
+        view = device.view or device.mode
+      end
+      if monitorViewNeedsPeriodicRedraw(view) then
+        return true
+      end
+    end
+  end
+
+  return false
 end
 
 function drawMonitor(name)
@@ -8151,8 +8628,11 @@ function alarmAudioStreamLoop()
       if not handleAlarmSpeakerAudioEmpty(event[2]) then
         handleAnnouncementSpeakerAudioEmpty(event[2])
       end
+      processAnnouncementQueue()
     elseif event[1] == "timer" and event[2] == watchdogTimer then
+      feedAlarmAudioStreams()
       feedAnnouncementAudioStreams()
+      processAnnouncementQueue()
       audioConfig = announcementAudioConfig()
       watchdogSeconds = audioWatchdogDelaySeconds(audioConfig)
       watchdogTimer = os.startTimer(watchdogSeconds)
@@ -8162,7 +8642,7 @@ end
 
 function kioskLocalControllerLoop()
   local options = kioskControllerOptions()
-  local pollSeconds = tonumber(options.pollSeconds) or 0.5
+  local pollSeconds = controllerPollSeconds()
   local helloSeconds = tonumber(options.helloSeconds) or 30
   local pollTimer = os.startTimer(pollSeconds)
   local helloTimer = os.startTimer(1)
@@ -8176,7 +8656,7 @@ function kioskLocalControllerLoop()
         controllerPollLocalCredentials()
       end
       options = kioskControllerOptions()
-      pollSeconds = tonumber(options.pollSeconds) or 0.5
+      pollSeconds = controllerPollSeconds()
       pollTimer = os.startTimer(pollSeconds)
     elseif name == "timer" and event[2] == helloTimer then
       if kioskControllerEnabled() then
@@ -8199,7 +8679,7 @@ function kioskLocalControllerLoop()
         })
       end
     elseif name == "peripheral" or name == "peripheral_detach" then
-      invalidateMonitorCache()
+      invalidatePeripheralCache()
       if kioskControllerEnabled() then
         broadcastControllerHello()
       end
@@ -8263,8 +8743,8 @@ function kioskMonitorLoop()
 
   while state.kiosk.running do
     kioskRefreshServerStatus()
-    drawMonitors(true)
-    sleep(tonumber(config.monitors and config.monitors.refreshSeconds) or 2)
+    drawMonitors(monitorsNeedPeriodicRedraw())
+    sleep(monitorRefreshSeconds())
   end
 end
 
@@ -8672,6 +9152,9 @@ function saveKioskControllerSetting(enabled)
   end
   if config.kiosk.controller.pollSeconds == nil then
     config.kiosk.controller.pollSeconds = 0.5
+  end
+  if config.kiosk.controller.idlePollSeconds == nil then
+    config.kiosk.controller.idlePollSeconds = 5
   end
   if config.kiosk.controller.helloSeconds == nil then
     config.kiosk.controller.helloSeconds = 30
@@ -9333,7 +9816,7 @@ function controllerMain()
   print("Waiting for server endpoint requests.")
   broadcastControllerHello()
   local helloTimer = os.startTimer(30)
-  local scanTimer = os.startTimer(0.25)
+  local scanTimer = os.startTimer(controllerPollSeconds())
 
   while true do
     local event = { os.pullEventRaw() }
@@ -9345,8 +9828,9 @@ function controllerMain()
       helloTimer = os.startTimer(30)
     elseif name == "timer" and event[2] == scanTimer then
       controllerPollLocalCredentials()
-      scanTimer = os.startTimer(0.25)
+      scanTimer = os.startTimer(controllerPollSeconds())
     elseif name == "peripheral" or name == "peripheral_detach" then
+      invalidatePeripheralCache()
       openRednet()
       broadcastControllerHello()
     elseif name == "nfc_data" then
@@ -9406,9 +9890,11 @@ function shutdownHardware()
 end
 
 function eventLoop()
-  scheduleTimer(config.pollSeconds or 1, { type = "poll" })
-  scheduleTimer((config.monitors and config.monitors.refreshSeconds) or 2, { type = "monitor" })
-  scheduleTimer(tonumber(config.kiosk and config.kiosk.syncSeconds) or 2, { type = "alarm_broadcast" })
+  scheduleTimer(credentialPollSeconds(), { type = "credential_poll" })
+  scheduleTimer(inputPollSeconds(), { type = "input_poll" })
+  scheduleTimer(sensorPollSeconds(), { type = "sensor_poll" })
+  scheduleTimer(monitorRefreshSeconds(), { type = "monitor" })
+  scheduleTimer(alarmBroadcastSeconds(), { type = "alarm_broadcast" })
   scheduleAnnouncementTimer()
 
   while state.running do
@@ -9425,17 +9911,32 @@ function eventLoop()
       local id = event[2]
       local payload = state.timers[id]
       state.timers[id] = nil
+      clearTimerKey(payload, id)
 
       if payload then
-        if payload.type == "poll" then
+        if payload.type == "credential_poll" then
+          pollCredentials()
+          scheduleTimer(credentialPollSeconds(), { type = "credential_poll" })
+        elseif payload.type == "input_poll" then
+          pollDoorInputs()
+          scheduleTimer(inputPollSeconds(), { type = "input_poll" })
+        elseif payload.type == "sensor_poll" then
+          pollFacilitySensors()
+          scheduleTimer(sensorPollSeconds(), { type = "sensor_poll" })
+        elseif payload.type == "poll" then
           pollInputs()
-          scheduleTimer(config.pollSeconds or 1, { type = "poll" })
+          scheduleTimer(normalizedSeconds(config.pollSeconds, 1, 0.1), { type = "poll" })
         elseif payload.type == "monitor" then
-          drawMonitors(true)
-          scheduleTimer((config.monitors and config.monitors.refreshSeconds) or 2, { type = "monitor" })
+          drawMonitors(monitorsNeedPeriodicRedraw())
+          scheduleTimer(monitorRefreshSeconds(), { type = "monitor" })
         elseif payload.type == "alarm_broadcast" then
           broadcastAlarmState()
-          scheduleTimer(tonumber(config.kiosk and config.kiosk.syncSeconds) or 2, { type = "alarm_broadcast" })
+          scheduleTimer(alarmBroadcastSeconds(), { type = "alarm_broadcast" })
+        elseif payload.type == "redstone_update" then
+          pollDoorInputs()
+          checkRedstoneFacilitySensors()
+        elseif payload.type == "stress_update" then
+          checkStressSensors()
         elseif payload.type == "announcement" then
           local text, voiceLine = nextConfiguredAnnouncement()
           if text then
@@ -9492,13 +9993,11 @@ function eventLoop()
     elseif name == "overstressed" then
       raiseAlarm("Create kinetic network overstressed", nil, "create", "power_fault")
     elseif name == "stress_change" then
-      checkGlobalSensors()
+      scheduleKeyedTimer("stress_update", stressDebounceSeconds(), { type = "stress_update" })
     elseif name == "redstone" then
-      checkDoorSensors()
-      checkEmergencyButtons()
-      checkGlobalSensors()
+      scheduleKeyedTimer("redstone_update", redstoneDebounceSeconds(), { type = "redstone_update" })
     elseif name == "peripheral" or name == "peripheral_detach" then
-      invalidateMonitorCache()
+      invalidatePeripheralCache()
       openRednet()
       markDirty()
     elseif name == "rednet_message" then

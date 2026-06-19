@@ -25,6 +25,11 @@ return {
   forcedGraceSeconds = 2,
   badgeCooldownSeconds = 3,
   pollSeconds = 1,
+  credentialPollSeconds = 1,
+  inputPollSeconds = 1,
+  sensorPollSeconds = 5,
+  redstoneDebounceSeconds = 0.05,
+  stressDebounceSeconds = 0.2,
 
   adminPins = { "0000" },
   adminSessionSeconds = 300,
@@ -127,6 +132,7 @@ return {
       credentialForwarding = true,
       helloSeconds = 30,
       pollSeconds = 0.5,
+      idlePollSeconds = 5,
     },
   },
 
@@ -185,16 +191,18 @@ return {
     maxSamples = 128000,
     chunkSamples = 24000,
     streamGraceSeconds = 30,
-    watchdogSeconds = 0.1,
-    idleWatchdogSeconds = 1,
+    watchdogSeconds = 0.25,
+    idleWatchdogSeconds = 2,
     tailSeconds = 0.5,
     maxChunksPerFeed = 8,
     prebufferSeconds = 2.5,
+    refillSeconds = 0.75,
     syncLeadSeconds = 1.5,
     syncToleranceSeconds = 0.08,
     syncSkipLate = true,
     serverPlayback = true,
     alarmAnnouncements = true,
+    queueLimit = 12,
     syncAssets = true,
     assetsRequired = false,
     -- assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
@@ -347,7 +355,7 @@ return {
       },
       personnel_request = {
         title = "Personnel Request",
-        voiceLines = { "{personnelVoiceLine}", "{personnelNameVoiceLine}", "{personnelReasonVoiceLine}", "{areaVoiceLine}" },
+        voiceLines = { "{personnelVoiceLine}", "{personnelNameVoiceLine}", "personnel_request", "{areaVoiceLine}", "{personnelReasonVoiceLine}" },
         cooldownSeconds = 3,
         variations = {
           "{personnel} requested in {area} for {personnelReasonLabel}. Title: {personnelTitle}.",
@@ -457,46 +465,25 @@ return {
       door_denied = { files = { "announcements/vo_attention.wav" } },
       door_secured = { files = { "announcements/vo_attention.wav" } },
       personnel_request = {
-        variations = {
-          { files = { "announcements/vo_yourequested.wav" } },
-          { files = { "announcements/vo_attention.wav", "announcements/vo_yourequested.wav" } },
-        },
+        files = { "announcements/vo_yourequested.wav" },
       },
       personnel_request_admin = {
-        variations = {
-          { files = { "announcements/vo_yourequested.wav", "announcements/vo_admin.wav" } },
-          { files = { "announcements/vo_attention.wav", "announcements/vo_admin.wav" } },
-        },
+        files = { "announcements/vo_admin.wav" },
       },
       personnel_request_doctor = {
-        variations = {
-          { files = { "announcements/vo_yourequested.wav", "announcements/vo_doctor.wav" } },
-          { files = { "announcements/vo_attention.wav", "announcements/vo_doctor.wav" } },
-        },
+        files = { "announcements/vo_doctor.wav" },
       },
       personnel_request_employee = {
-        variations = {
-          { files = { "announcements/vo_yourequested.wav", "announcements/vo_employee.wav" } },
-          { files = { "announcements/vo_attention.wav", "announcements/vo_employee.wav" } },
-        },
+        files = { "announcements/vo_employee.wav" },
       },
       personnel_request_engineer = {
-        variations = {
-          { files = { "announcements/vo_yourequested.wav", "announcements/vo_engineer.wav" } },
-          { files = { "announcements/vo_attention.wav", "announcements/vo_engineer.wav" } },
-        },
+        files = { "announcements/vo_engineer.wav" },
       },
       personnel_request_maintenance = {
-        variations = {
-          { files = { "announcements/vo_yourequested.wav", "announcements/vo_maintenance.wav" } },
-          { files = { "announcements/vo_attention.wav", "announcements/vo_maintenance.wav" } },
-        },
+        files = { "announcements/vo_maintenance.wav" },
       },
       personnel_request_security = {
-        variations = {
-          { files = { "announcements/vo_yourequested.wav", "announcements/vo_security.wav" } },
-          { files = { "announcements/vo_attention.wav", "announcements/vo_security.wav" } },
-        },
+        files = { "announcements/vo_security.wav" },
       },
       person_crafthessu = { files = { "announcements/vo_person_crafthessu.wav" } },
       person_faceremover = { files = { "announcements/vo_person_faceremover.wav" } },
