@@ -92,6 +92,7 @@ local state = {
     soundStartAt = nil,
     soundIndex = 1,
     audioCache = {},
+    preparedAudioCache = {},
     audioStreams = {},
     audioGeneration = 0,
     audioPlayingUntil = 0,
@@ -389,7 +390,7 @@ function installKioskConfigIfMissing()
   handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
   handle.writeLine("  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.5, idlePollSeconds = 5 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 8192, remoteAudioYieldChunks = 4, remoteAudioYieldSeconds = 0.03, remoteAudioLeadSeconds = 1, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 4096, remoteAudioYieldChunks = 4, remoteAudioYieldSeconds = 0.03, remoteAudioLeadSeconds = 1, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
@@ -703,7 +704,8 @@ function serverMillisToLocalMillis(value)
   if not value then
     return nil
   end
-  if tostring(config and config.mode or "") ~= "kiosk" then
+  local mode = string.lower(tostring(config and config.mode or "server"))
+  if mode ~= "kiosk" and mode ~= "controller" and mode ~= "door" and mode ~= "door_controller" then
     return value
   end
   return value - (tonumber(state.kiosk and state.kiosk.clockOffsetMillis) or 0)
@@ -2707,6 +2709,78 @@ function buildAlarmSoundBuffer(profile, sound)
   return nil
 end
 
+function clearAlarmPreparedAudioCache()
+  state.alarm.preparedAudioCache = {}
+end
+
+function alarmPreparedAudioCacheEnabled(profile)
+  local alarm = config and config.alarm or {}
+  local audio = type(profile and profile.audio) == "table" and profile.audio or {}
+  if alarm.cacheOnStart == false or alarm.cacheAudio == false or audio.cacheOnStart == false or audio.cacheAudio == false then
+    return false
+  end
+  return true
+end
+
+function alarmPreparedAudioCacheKey(profile, soundIndex)
+  local audioConfig = alarmAudioConfig(profile or {})
+  return tostring(profile and profile.name or state.alarm.profile or "alarm")
+    .. "|"
+    .. tostring(soundIndex or 1)
+    .. "|"
+    .. tostring(audioConfig.sampleRate or "")
+end
+
+function preparedAlarmSoundBuffer(profile, sound, soundIndex)
+  if not alarmPreparedAudioCacheEnabled(profile) then
+    local buffer = buildAlarmSoundBuffer(profile, sound)
+    if not buffer then
+      buffer = buildDspAlarmBuffer(profile)
+    end
+    return buffer
+  end
+
+  state.alarm.preparedAudioCache = state.alarm.preparedAudioCache or {}
+  local key = alarmPreparedAudioCacheKey(profile, soundIndex)
+  local cached = state.alarm.preparedAudioCache[key]
+  if cached ~= nil then
+    return cached ~= false and cached or nil
+  end
+
+  local buffer = buildAlarmSoundBuffer(profile, sound)
+  if not buffer then
+    buffer = buildDspAlarmBuffer(profile)
+  end
+  if type(buffer) == "table" and #buffer > 0 then
+    state.alarm.preparedAudioCache[key] = buffer
+    return buffer
+  end
+
+  state.alarm.preparedAudioCache[key] = false
+  return nil
+end
+
+function prepareAlarmSoundCache(profileName)
+  local profile = alarmProfile(profileName)
+  if not alarmPreparedAudioCacheEnabled(profile) then
+    return
+  end
+
+  clearAlarmPreparedAudioCache()
+  local sounds = profile.sounds or {}
+  if #sounds == 0 then
+    preparedAlarmSoundBuffer(profile, nil, 1)
+    return
+  end
+
+  for index, sound in ipairs(sounds) do
+    preparedAlarmSoundBuffer(profile, sound, index)
+    if index % 2 == 0 then
+      sleep(0)
+    end
+  end
+end
+
 function alarmPlaybackChunkSize(profile)
   local audioConfig = alarmAudioConfig(profile)
   local chunkSamples = tonumber(audioConfig.chunkSamples) or tonumber(audioConfig.maxSamples) or 128000
@@ -2851,7 +2925,7 @@ function preparedAudioConfig()
       and announcements.remoteAudio ~= false
       and announcements.networkAudio ~= false,
     clientSynthesis = announcements.clientAudioSynthesis == true or announcements.localAudioSynthesis == true,
-    chunkSamples = tonumber(audio.networkChunkSamples or announcements.networkChunkSamples or announcements.remoteAudioChunkSamples) or 8192,
+    chunkSamples = tonumber(audio.networkChunkSamples or announcements.networkChunkSamples or announcements.remoteAudioChunkSamples) or 4096,
     leadSeconds = tonumber(audio.networkLeadSeconds or announcements.networkLeadSeconds or announcements.remoteAudioLeadSeconds) or 1,
     streamTtlSeconds = tonumber(audio.networkStreamTtlSeconds or announcements.networkStreamTtlSeconds) or 45,
     yieldChunks = tonumber(audio.networkYieldChunks or announcements.networkYieldChunks or announcements.remoteAudioYieldChunks) or 4,
@@ -2879,12 +2953,15 @@ function kioskServerPreparedAudioOnly()
 end
 
 function preparedAudioChunkSamples()
-  local chunkSamples = math.floor(tonumber(preparedAudioConfig().chunkSamples) or 8192)
+  local chunkSamples = math.floor(tonumber(preparedAudioConfig().chunkSamples) or 4096)
   if chunkSamples < 512 then
     return 512
   end
-  if chunkSamples > 12000 then
-    return 12000
+  if secureRednet.enabled(config and config.rednet or {}) and chunkSamples > 2048 then
+    chunkSamples = 2048
+  end
+  if chunkSamples > 4096 then
+    return 4096
   end
   return chunkSamples
 end
@@ -3095,6 +3172,7 @@ function handlePreparedAudioMessage(message, sender)
   if type(message) ~= "table" or not preparedAudioSenderAllowed(sender) then
     return false
   end
+  updateKioskClockOffset(message, sender)
   cleanupRemoteAudioStreams()
 
   local stream = remoteAudioStream(message.streamId or message.id)
@@ -3132,7 +3210,7 @@ function handlePreparedAudioMessage(message, sender)
       if message.totalChunks then
         stream.totalChunks = tonumber(message.totalChunks) or stream.totalChunks
       end
-      if message.startAtMillis then
+      if message.startAtMillis and not stream.finished then
         stream.startAtMillis = message.startAtMillis
       end
       return startPreparedAudioPlayback(stream) or true
@@ -4023,16 +4101,17 @@ function playAlarmPulse()
 
   local profile = alarmProfile(state.alarm.profile)
   local sounds = profile.sounds or {}
-  local sound = sounds[state.alarm.soundIndex] or sounds[1]
+  local soundIndex = state.alarm.soundIndex
+  local sound = sounds[soundIndex] or sounds[1]
+  if not sounds[soundIndex] and sounds[1] then
+    soundIndex = 1
+  end
   state.alarm.soundIndex = state.alarm.soundIndex + 1
   if #sounds > 0 and state.alarm.soundIndex > #sounds then
     state.alarm.soundIndex = 1
   end
 
-  local audioBuffer = buildAlarmSoundBuffer(profile, sound)
-  if not audioBuffer then
-    audioBuffer = buildDspAlarmBuffer(profile)
-  end
+  local audioBuffer = preparedAlarmSoundBuffer(profile, sound, soundIndex)
   local usePreparedAudio = preparedAudioBroadcastEnabled()
   if audioBuffer and not usePreparedAudio then
     audioBuffer = alignAlarmPcmToSchedule(profile, audioBuffer)
@@ -4111,6 +4190,7 @@ function raiseAlarm(reason, doorId, actor, profileName)
       state.alarm.soundStartAt = state.alarm.sinceMillis + alarmSyncLeadMillis(alarmProfile("emergency"))
       state.alarm.soundIndex = 1
       local profile = alarmProfile("emergency")
+      pcall(prepareAlarmSoundCache, "emergency")
       broadcastAlarmState()
       scheduleAlarmPulse()
       setAlarmOutputs(true)
@@ -4153,9 +4233,11 @@ function raiseAlarm(reason, doorId, actor, profileName)
   state.alarm.soundStartAt = state.alarm.sinceMillis + alarmSyncLeadMillis(alarmProfile(profileName))
   state.alarm.soundIndex = 1
   clearAlarmAudioStreams(true)
+  clearAlarmPreparedAudioCache()
   clearAnnouncementAudioStreams(true)
 
   local profile = alarmProfile(profileName)
+  pcall(prepareAlarmSoundCache, profileName)
   broadcastAlarmState()
   scheduleAlarmPulse()
   setAlarmOutputs(true)
@@ -4192,6 +4274,7 @@ function resetAlarm(actor)
   state.alarm.sinceMillis = nil
   state.alarm.soundStartAt = nil
   clearAlarmAudioStreams(true)
+  clearAlarmPreparedAudioCache()
   audit("ALARM_RESET", actor or "console")
   broadcastAlarmState()
   broadcastEventNotification("alarm_reset", "Alarm Reset", "Alarm cleared by " .. tostring(actor or "console"), "info", {

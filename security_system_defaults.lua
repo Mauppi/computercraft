@@ -203,7 +203,7 @@ return {
     serverPlayback = true,
     serverPreparedAudio = true,
     clientAudioSynthesis = false,
-    remoteAudioChunkSamples = 8192,
+    remoteAudioChunkSamples = 4096,
     remoteAudioYieldChunks = 4,
     remoteAudioYieldSeconds = 0.03,
     remoteAudioLeadSeconds = 1,
