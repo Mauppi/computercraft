@@ -3,6 +3,10 @@
 local M = {}
 
 local DEFAULT_SAMPLE_RATE = 48000
+local wavCache = {}
+local wavCacheOrder = {}
+local wavCacheSerial = 0
+local wavCacheSamples = 0
 
 local function combinePath(base, path)
   base = string.gsub(tostring(base or ""), "\\", "/")
@@ -33,6 +37,72 @@ end
 
 local function targetRate(config)
   return tonumber(config and config.sampleRate) or DEFAULT_SAMPLE_RATE
+end
+
+local function wavCacheOptions(config)
+  local audio = type(config and config.audio) == "table" and config.audio or {}
+  local enabled = not (config and (config.wavCache == false or config.cacheWavs == false))
+    and not (audio.wavCache == false or audio.cacheWavs == false)
+  local maxEntries = math.floor(tonumber(audio.wavCacheMaxEntries or config and config.wavCacheMaxEntries) or 16)
+  local maxSamples = math.floor(tonumber(audio.wavCacheMaxSamples or config and config.wavCacheMaxSamples) or 384000)
+  local maxTotalSamples = math.floor(tonumber(audio.wavCacheMaxTotalSamples or config and config.wavCacheMaxTotalSamples) or 768000)
+  if maxEntries < 1 then
+    maxEntries = 1
+  end
+  if maxSamples < 0 then
+    maxSamples = 0
+  end
+  if maxTotalSamples < maxSamples then
+    maxTotalSamples = maxSamples
+  end
+  return enabled, maxEntries, maxSamples, maxTotalSamples
+end
+
+local function wavCacheKey(path, config)
+  return tostring(path or "") .. "|" .. tostring(targetRate(config))
+end
+
+local function getCachedWav(key)
+  local entry = wavCache[key]
+  if not entry then
+    return nil
+  end
+  return entry.samples
+end
+
+local function pruneWavCache(maxEntries, maxTotalSamples)
+  while (#wavCacheOrder > maxEntries or wavCacheSamples > maxTotalSamples) and #wavCacheOrder > 0 do
+    local oldest = table.remove(wavCacheOrder, 1)
+    local entry = oldest and wavCache[oldest.key]
+    if entry and entry.serial == oldest.serial then
+      wavCache[oldest.key] = nil
+      wavCacheSamples = wavCacheSamples - (entry.count or 0)
+    end
+  end
+end
+
+local function putCachedWav(key, samples, config)
+  if not (type(samples) == "table" and #samples > 0) then
+    return
+  end
+  local enabled, maxEntries, maxSamples, maxTotalSamples = wavCacheOptions(config)
+  if not enabled or maxSamples <= 0 or #samples > maxSamples then
+    return
+  end
+
+  local existing = wavCache[key]
+  if existing then
+    wavCacheSamples = wavCacheSamples - (existing.count or 0)
+  end
+  wavCacheSerial = wavCacheSerial + 1
+  wavCache[key] = {
+    samples = samples,
+    count = #samples,
+    serial = wavCacheSerial,
+  }
+  wavCacheSamples = wavCacheSamples + #samples
+  wavCacheOrder[#wavCacheOrder + 1] = { key = key, serial = wavCacheSerial }
+  pruneWavCache(maxEntries, maxTotalSamples)
 end
 
 local function clamp(value)
@@ -193,6 +263,12 @@ local function hasSamples(samples)
 end
 
 function M.loadWav(path, config)
+  local cacheKey = wavCacheKey(path, config)
+  local cached = getCachedWav(cacheKey)
+  if cached then
+    return cached
+  end
+
   local data, err = readFile(path)
   if not data then
     return nil, err
@@ -245,21 +321,37 @@ function M.loadWav(path, config)
   end
 
   local samples = {}
+  local outIndex = 1
   local last = math.min(#data + 1, dataStart + dataSize)
-  for frame = dataStart, last - frameSize, frameSize do
-    local total = 0
-    for channel = 0, fmt.channels - 1 do
-      local samplePos = frame + (channel * bytesPerSample)
-      if fmt.bits == 8 then
-        total = total + ((string.byte(data, samplePos) or 128) - 128)
-      else
-        total = total + math.floor(s16le(data, samplePos) / 256)
-      end
+  if fmt.channels == 1 and fmt.bits == 8 then
+    for frame = dataStart, last - frameSize, frameSize do
+      samples[outIndex] = (string.byte(data, frame) or 128) - 128
+      outIndex = outIndex + 1
     end
-    samples[#samples + 1] = clamp(total / fmt.channels)
+  elseif fmt.channels == 1 and fmt.bits == 16 then
+    for frame = dataStart, last - frameSize, frameSize do
+      samples[outIndex] = math.floor(s16le(data, frame) / 256)
+      outIndex = outIndex + 1
+    end
+  else
+    for frame = dataStart, last - frameSize, frameSize do
+      local total = 0
+      for channel = 0, fmt.channels - 1 do
+        local samplePos = frame + (channel * bytesPerSample)
+        if fmt.bits == 8 then
+          total = total + ((string.byte(data, samplePos) or 128) - 128)
+        else
+          total = total + math.floor(s16le(data, samplePos) / 256)
+        end
+      end
+      samples[outIndex] = clamp(total / fmt.channels)
+      outIndex = outIndex + 1
+    end
   end
 
-  return resample(samples, fmt.sampleRate, targetRate(config))
+  samples = resample(samples, fmt.sampleRate, targetRate(config))
+  putCachedWav(cacheKey, samples, config)
+  return samples
 end
 
 local function charFrequency(char)

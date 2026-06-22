@@ -4,9 +4,17 @@
 local M = {}
 
 local HEX = "0123456789abcdef"
+local HEX_BYTES = {}
+local HEX_VALUES = {}
 
-local function byteAt(text, index)
-  return string.byte(text, ((index - 1) % #text) + 1) or 0
+for value = 0, 255 do
+  local hi = math.floor(value / 16) + 1
+  local lo = (value % 16) + 1
+  HEX_BYTES[value] = string.sub(HEX, hi, hi) .. string.sub(HEX, lo, lo)
+end
+
+for index = 1, #HEX do
+  HEX_VALUES[string.sub(HEX, index, index)] = index - 1
 end
 
 local function hash32(text)
@@ -19,26 +27,17 @@ local function hash32(text)
   return hash
 end
 
-local function keyByte(key, nonce, index)
-  local seed = hash32(tostring(key) .. ":" .. tostring(nonce) .. ":" .. tostring(math.floor((index - 1) / 32)))
-  local value = (seed + byteAt(key, index) * 131 + byteAt(nonce, index) * 17 + index * 29) % 256
-  return value
-end
-
 local function toHexByte(value)
-  value = value % 256
-  local hi = math.floor(value / 16) + 1
-  local lo = (value % 16) + 1
-  return string.sub(HEX, hi, hi) .. string.sub(HEX, lo, lo)
+  return HEX_BYTES[value % 256]
 end
 
-local function fromHexByte(pair)
-  local hi = string.find(HEX, string.sub(pair, 1, 1), 1, true)
-  local lo = string.find(HEX, string.sub(pair, 2, 2), 1, true)
-  if not hi or not lo then
+local function fromHexByte(hex, pos)
+  local hi = HEX_VALUES[string.sub(hex, pos, pos)]
+  local lo = HEX_VALUES[string.sub(hex, pos + 1, pos + 1)]
+  if hi == nil or lo == nil then
     return nil
   end
-  return (hi - 1) * 16 + (lo - 1)
+  return hi * 16 + lo
 end
 
 local function nonce()
@@ -60,9 +59,16 @@ end
 
 local function encryptText(text, key, useNonce)
   local out = {}
+  local keyLen = #key
+  local nonceLen = #useNonce
+  local seed = nil
   for index = 1, #text do
-    local value = (string.byte(text, index) + keyByte(key, useNonce, index)) % 256
-    out[#out + 1] = toHexByte(value)
+    if (index - 1) % 32 == 0 then
+      seed = hash32(tostring(key) .. ":" .. tostring(useNonce) .. ":" .. tostring(math.floor((index - 1) / 32)))
+    end
+    local keyValue = (seed + (string.byte(key, ((index - 1) % keyLen) + 1) or 0) * 131 + (string.byte(useNonce, ((index - 1) % nonceLen) + 1) or 0) * 17 + index * 29) % 256
+    local value = (string.byte(text, index) + keyValue) % 256
+    out[index] = toHexByte(value)
   end
   return table.concat(out)
 end
@@ -74,12 +80,19 @@ local function decryptText(hex, key, useNonce)
 
   local out = {}
   local outIndex = 1
+  local keyLen = #key
+  local nonceLen = #useNonce
+  local seed = nil
   for index = 1, #hex, 2 do
-    local value = fromHexByte(string.sub(hex, index, index + 1))
+    local value = fromHexByte(hex, index)
     if value == nil then
       return nil
     end
-    local plain = (value - keyByte(key, useNonce, outIndex)) % 256
+    if (outIndex - 1) % 32 == 0 then
+      seed = hash32(tostring(key) .. ":" .. tostring(useNonce) .. ":" .. tostring(math.floor((outIndex - 1) / 32)))
+    end
+    local keyValue = (seed + (string.byte(key, ((outIndex - 1) % keyLen) + 1) or 0) * 131 + (string.byte(useNonce, ((outIndex - 1) % nonceLen) + 1) or 0) * 17 + outIndex * 29) % 256
+    local plain = (value - keyValue) % 256
     out[outIndex] = string.char(plain)
     outIndex = outIndex + 1
   end

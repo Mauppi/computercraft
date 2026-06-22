@@ -389,7 +389,7 @@ function installKioskConfigIfMissing()
   handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
   handle.writeLine("  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.5, idlePollSeconds = 5 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 2048, remoteAudioYieldChunks = 8, remoteAudioLeadSeconds = 0.75, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 8192, remoteAudioYieldChunks = 4, remoteAudioYieldSeconds = 0.03, remoteAudioLeadSeconds = 1, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
@@ -2851,10 +2851,11 @@ function preparedAudioConfig()
       and announcements.remoteAudio ~= false
       and announcements.networkAudio ~= false,
     clientSynthesis = announcements.clientAudioSynthesis == true or announcements.localAudioSynthesis == true,
-    chunkSamples = tonumber(audio.networkChunkSamples or announcements.networkChunkSamples or announcements.remoteAudioChunkSamples) or 2048,
-    leadSeconds = tonumber(audio.networkLeadSeconds or announcements.networkLeadSeconds or announcements.remoteAudioLeadSeconds) or 0.75,
+    chunkSamples = tonumber(audio.networkChunkSamples or announcements.networkChunkSamples or announcements.remoteAudioChunkSamples) or 8192,
+    leadSeconds = tonumber(audio.networkLeadSeconds or announcements.networkLeadSeconds or announcements.remoteAudioLeadSeconds) or 1,
     streamTtlSeconds = tonumber(audio.networkStreamTtlSeconds or announcements.networkStreamTtlSeconds) or 45,
-    yieldChunks = tonumber(audio.networkYieldChunks or announcements.networkYieldChunks or announcements.remoteAudioYieldChunks) or 8,
+    yieldChunks = tonumber(audio.networkYieldChunks or announcements.networkYieldChunks or announcements.remoteAudioYieldChunks) or 4,
+    yieldSeconds = tonumber(audio.networkYieldSeconds or announcements.networkYieldSeconds or announcements.remoteAudioYieldSeconds) or 0.03,
   }
 end
 
@@ -2863,7 +2864,9 @@ function preparedAudioEnabled()
 end
 
 function preparedAudioBroadcastEnabled()
-  return preparedAudioEnabled() and config and config.rednet and config.rednet.enabled and rednet ~= nil
+  local mode = string.lower(tostring(config and config.mode or "server"))
+  local serverMode = mode ~= "kiosk" and mode ~= "controller" and mode ~= "door" and mode ~= "door_controller"
+  return serverMode and preparedAudioEnabled() and config and config.rednet and config.rednet.enabled and rednet ~= nil
 end
 
 function kioskServerPreparedAudioOnly()
@@ -2876,7 +2879,7 @@ function kioskServerPreparedAudioOnly()
 end
 
 function preparedAudioChunkSamples()
-  local chunkSamples = math.floor(tonumber(preparedAudioConfig().chunkSamples) or 2048)
+  local chunkSamples = math.floor(tonumber(preparedAudioConfig().chunkSamples) or 8192)
   if chunkSamples < 512 then
     return 512
   end
@@ -2887,7 +2890,7 @@ function preparedAudioChunkSamples()
 end
 
 function preparedAudioLeadMillis()
-  local seconds = tonumber(preparedAudioConfig().leadSeconds) or 0.75
+  local seconds = tonumber(preparedAudioConfig().leadSeconds) or 1
   if seconds < 0 then
     seconds = 0
   elseif seconds > 5 then
@@ -2897,13 +2900,23 @@ function preparedAudioLeadMillis()
 end
 
 function preparedAudioYieldChunks()
-  local chunks = math.floor(tonumber(preparedAudioConfig().yieldChunks) or 8)
+  local chunks = math.floor(tonumber(preparedAudioConfig().yieldChunks) or 4)
   if chunks < 1 then
     return 1
   elseif chunks > 64 then
     return 64
   end
   return chunks
+end
+
+function preparedAudioYieldSeconds()
+  local seconds = tonumber(preparedAudioConfig().yieldSeconds) or 0
+  if seconds < 0 then
+    return 0
+  elseif seconds > 0.25 then
+    return 0.25
+  end
+  return seconds
 end
 
 function preparedAudioStartMillis(startAtMillis)
@@ -2917,10 +2930,19 @@ end
 
 function packPcmSamples(pcm, firstIndex, lastIndex)
   local out = {}
-  local outIndex = 1
+  local block = {}
+  local blockIndex = 1
   for index = firstIndex, lastIndex do
-    out[outIndex] = string.char((clampSample(pcm[index]) + 128) % 256)
-    outIndex = outIndex + 1
+    block[blockIndex] = (clampSample(pcm[index]) + 128) % 256
+    if blockIndex >= 256 then
+      out[#out + 1] = string.char(unpackArgs(block, 1, blockIndex))
+      blockIndex = 1
+    else
+      blockIndex = blockIndex + 1
+    end
+  end
+  if blockIndex > 1 then
+    out[#out + 1] = string.char(unpackArgs(block, 1, blockIndex - 1))
   end
   return table.concat(out)
 end
@@ -2930,8 +2952,13 @@ function appendPackedPcmSamples(buffer, packed)
     return
   end
   local offset = #buffer
-  for index = 1, #packed do
-    buffer[offset + index] = (string.byte(packed, index) or 128) - 128
+  for index = 1, #packed, 256 do
+    local last = math.min(#packed, index + 255)
+    local bytes = { string.byte(packed, index, last) }
+    for byteIndex = 1, #bytes do
+      buffer[offset + byteIndex] = (bytes[byteIndex] or 128) - 128
+    end
+    offset = offset + #bytes
   end
 end
 
@@ -3111,9 +3138,20 @@ function handlePreparedAudioMessage(message, sender)
       return startPreparedAudioPlayback(stream) or true
     end
   elseif action == "finish" or action == "end" then
+    stream.kind = message.kind or stream.kind or "announcement"
+    stream.profile = message.profile or stream.profile
+    stream.volume = message.volume or stream.volume
+    stream.sampleRate = message.sampleRate or stream.sampleRate
+    stream.totalSamples = tonumber(message.totalSamples) or stream.totalSamples
     stream.finished = true
     stream.totalChunks = tonumber(message.totalChunks) or stream.totalChunks
     stream.startAtMillis = message.startAtMillis or stream.startAtMillis
+    if message.allowDuringAlarm ~= nil then
+      stream.allowDuringAlarm = message.allowDuringAlarm and true or false
+    end
+    if message.clearExisting ~= nil then
+      stream.clearExisting = message.clearExisting ~= false
+    end
     return startPreparedAudioPlayback(stream)
   elseif action == "stop" then
     if message.kind == "alarm" then
@@ -3137,6 +3175,7 @@ function broadcastPreparedAudio(kind, pcm, options)
   openRednet()
   local chunkSamples = preparedAudioChunkSamples()
   local yieldChunks = preparedAudioYieldChunks()
+  local yieldSeconds = preparedAudioYieldSeconds()
   local totalChunks = math.ceil(#pcm / chunkSamples)
   local streamId = options.streamId or makeId("audio")
   local startAtMillis = preparedAudioStartMillis(options.startAtMillis)
@@ -3180,12 +3219,14 @@ function broadcastPreparedAudio(kind, pcm, options)
       startAtMillis = startAtMillis,
     })
     if chunkIndex % yieldChunks == 0 then
-      sleep(0)
+      sleep(yieldSeconds)
     end
   end
 
+  startAtMillis = preparedAudioStartMillis(startAtMillis)
   local finishMessage = shallowCopy(base)
   finishMessage.action = "finish"
+  finishMessage.startAtMillis = startAtMillis
   sendPreparedAudioMessage(finishMessage)
   return sentAll, startAtMillis
 end
