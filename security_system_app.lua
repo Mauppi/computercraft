@@ -389,7 +389,7 @@ function installKioskConfigIfMissing()
   handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
   handle.writeLine("  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.5, idlePollSeconds = 5 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 2048, remoteAudioLeadSeconds = 0.75, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 2048, remoteAudioYieldChunks = 8, remoteAudioLeadSeconds = 0.75, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
@@ -2854,6 +2854,7 @@ function preparedAudioConfig()
     chunkSamples = tonumber(audio.networkChunkSamples or announcements.networkChunkSamples or announcements.remoteAudioChunkSamples) or 2048,
     leadSeconds = tonumber(audio.networkLeadSeconds or announcements.networkLeadSeconds or announcements.remoteAudioLeadSeconds) or 0.75,
     streamTtlSeconds = tonumber(audio.networkStreamTtlSeconds or announcements.networkStreamTtlSeconds) or 45,
+    yieldChunks = tonumber(audio.networkYieldChunks or announcements.networkYieldChunks or announcements.remoteAudioYieldChunks) or 8,
   }
 end
 
@@ -2893,6 +2894,16 @@ function preparedAudioLeadMillis()
     seconds = 5
   end
   return math.floor((seconds * 1000) + 0.5)
+end
+
+function preparedAudioYieldChunks()
+  local chunks = math.floor(tonumber(preparedAudioConfig().yieldChunks) or 8)
+  if chunks < 1 then
+    return 1
+  elseif chunks > 64 then
+    return 64
+  end
+  return chunks
 end
 
 function preparedAudioStartMillis(startAtMillis)
@@ -3125,6 +3136,7 @@ function broadcastPreparedAudio(kind, pcm, options)
 
   openRednet()
   local chunkSamples = preparedAudioChunkSamples()
+  local yieldChunks = preparedAudioYieldChunks()
   local totalChunks = math.ceil(#pcm / chunkSamples)
   local streamId = options.streamId or makeId("audio")
   local startAtMillis = preparedAudioStartMillis(options.startAtMillis)
@@ -3163,9 +3175,13 @@ function broadcastPreparedAudio(kind, pcm, options)
       streamId = streamId,
       index = chunkIndex,
       totalChunks = totalChunks,
-      samples = pcmChunk(pcm, firstIndex, lastIndex, true),
+      samples = packPcmSamples(pcm, firstIndex, lastIndex),
+      sampleEncoding = "s8",
       startAtMillis = startAtMillis,
     })
+    if chunkIndex % yieldChunks == 0 then
+      sleep(0)
+    end
   end
 
   local finishMessage = shallowCopy(base)
