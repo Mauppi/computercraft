@@ -94,6 +94,7 @@ local state = {
     audioCache = {},
     preparedAudioCache = {},
     audioStreams = {},
+    pendingAudioStreams = {},
     audioGeneration = 0,
     audioPlayingUntil = 0,
   },
@@ -861,6 +862,14 @@ function localComputerId()
     return os.getComputerID()
   end
   return nil
+end
+
+function serverSenderAllowed(sender)
+  local serverId = config and config.rednet and config.rednet.serverId
+  if not serverId and state and state.kiosk then
+    serverId = state.kiosk.serverId
+  end
+  return serverId == nil or tostring(sender) == tostring(serverId)
 end
 
 function endpointController(endpoint)
@@ -2818,6 +2827,34 @@ function alarmLoopGap(profile)
   return math.max(0, gap)
 end
 
+function alarmPreloadSeconds(profile)
+  local alarm = config and config.alarm or {}
+  local audio = type(profile and profile.audio) == "table" and profile.audio or {}
+  local seconds = tonumber(audio.preloadSeconds or profile and profile.preloadSeconds or alarm.preloadSeconds)
+  if seconds == nil then
+    seconds = math.max(0.25, math.min(1.5, (preparedAudioLeadMillis() / 1000) + 0.25))
+  end
+  if seconds < 0 then
+    return 0
+  elseif seconds > 5 then
+    return 5
+  end
+  return seconds
+end
+
+function alarmCanPreloadNextPulse(profile)
+  if alarmHasPendingAudioStream() then
+    return false
+  end
+  local hasActive = false
+  for _ in pairs(state.alarm.audioStreams or {}) do
+    hasActive = true
+    break
+  end
+  local remaining = (tonumber(state.alarm.audioPlayingUntil) or 0) - os.clock()
+  return hasActive and remaining <= alarmPreloadSeconds(profile)
+end
+
 function alarmSyncLeadMillis(profile)
   local seconds = tonumber(profile and profile.syncLeadSeconds) or 1.5
   if seconds < 0 then
@@ -2840,6 +2877,7 @@ end
 
 function pruneAlarmAudioStreams()
   state.alarm.audioStreams = state.alarm.audioStreams or {}
+  state.alarm.pendingAudioStreams = state.alarm.pendingAudioStreams or {}
   local now = os.clock()
   for name, stream in pairs(state.alarm.audioStreams) do
     local queuedUntil = tonumber(stream.queuedUntil)
@@ -2848,6 +2886,12 @@ function pruneAlarmAudioStreams()
     local expired = stream.deadline and now > stream.deadline
     if not state.alarm.active or stream.generation ~= state.alarm.audioGeneration or queueFinished or expired then
       state.alarm.audioStreams[name] = nil
+    end
+  end
+  for name, stream in pairs(state.alarm.pendingAudioStreams) do
+    local expired = stream.deadline and now > stream.deadline
+    if not state.alarm.active or stream.generation ~= state.alarm.audioGeneration or expired then
+      state.alarm.pendingAudioStreams[name] = nil
     end
   end
 end
@@ -2860,11 +2904,15 @@ function alarmAudioBusy()
   for _ in pairs(state.alarm.audioStreams or {}) do
     return true
   end
+  for _ in pairs(state.alarm.pendingAudioStreams or {}) do
+    return true
+  end
   return false
 end
 
 function clearAlarmAudioStreams(stopSpeakers)
   state.alarm.audioStreams = {}
+  state.alarm.pendingAudioStreams = {}
   state.alarm.audioPlayingUntil = 0
   state.alarm.audioGeneration = (state.alarm.audioGeneration or 0) + 1
 
@@ -3039,6 +3087,30 @@ function appendPackedPcmSamples(buffer, packed)
   end
 end
 
+function alarmHasPendingAudioStream()
+  pruneAlarmAudioStreams()
+  for _ in pairs(state.alarm.pendingAudioStreams or {}) do
+    return true
+  end
+  return false
+end
+
+function promotePendingAlarmStream(speakerName, previousQueuedUntil)
+  state.alarm.pendingAudioStreams = state.alarm.pendingAudioStreams or {}
+  local pending = state.alarm.pendingAudioStreams[speakerName]
+  if not pending then
+    return false
+  end
+
+  state.alarm.pendingAudioStreams[speakerName] = nil
+  if previousQueuedUntil then
+    pending.queuedUntil = math.max(tonumber(pending.queuedUntil) or 0, tonumber(previousQueuedUntil) or 0)
+  end
+  pending.promoted = true
+  state.alarm.audioStreams[speakerName] = pending
+  return alarmFeedSpeakerStream(speakerName)
+end
+
 function appendPcmSampleTable(buffer, samples)
   if type(samples) ~= "table" then
     return
@@ -3127,7 +3199,7 @@ function startPreparedAudioPlayback(stream)
     return false
   end
 
-  local startAtMillis = serverMillisToLocalMillis(stream.startAtMillis) or nowMillis()
+  local startAtMillis = stream.queueAfterCurrent and nil or serverMillisToLocalMillis(stream.startAtMillis)
   local volume = tonumber(stream.volume) or 1
   local kind = tostring(stream.kind or "announcement")
   local played = false
@@ -3138,7 +3210,11 @@ function startPreparedAudioPlayback(stream)
     end
     local profile = alarmProfile(stream.profile or state.alarm.profile)
     for _, entry in ipairs(findSpeakerEntries()) do
-      if startAlarmAudioStream(profile, entry.name, entry.speaker, pcm, volume, { startAtMillis = startAtMillis }) then
+      if startAlarmAudioStream(profile, entry.name, entry.speaker, pcm, volume, {
+        startAtMillis = startAtMillis,
+        replaceExisting = stream.clearExisting ~= false,
+        queueAfterCurrent = stream.queueAfterCurrent and true or false,
+      }) then
         played = true
       end
     end
@@ -3191,6 +3267,7 @@ function handlePreparedAudioMessage(message, sender)
     stream.totalChunks = tonumber(message.totalChunks) or stream.totalChunks
     stream.allowDuringAlarm = message.allowDuringAlarm and true or false
     stream.clearExisting = message.clearExisting ~= false
+    stream.queueAfterCurrent = message.queueAfterCurrent and true or false
     stream.finished = false
     if stream.clearExisting then
       if stream.kind == "alarm" then
@@ -3221,6 +3298,7 @@ function handlePreparedAudioMessage(message, sender)
     stream.volume = message.volume or stream.volume
     stream.sampleRate = message.sampleRate or stream.sampleRate
     stream.totalSamples = tonumber(message.totalSamples) or stream.totalSamples
+    stream.queueAfterCurrent = message.queueAfterCurrent and true or false
     stream.finished = true
     stream.totalChunks = tonumber(message.totalChunks) or stream.totalChunks
     stream.startAtMillis = message.startAtMillis or stream.startAtMillis
@@ -3256,7 +3334,8 @@ function broadcastPreparedAudio(kind, pcm, options)
   local yieldSeconds = preparedAudioYieldSeconds()
   local totalChunks = math.ceil(#pcm / chunkSamples)
   local streamId = options.streamId or makeId("audio")
-  local startAtMillis = preparedAudioStartMillis(options.startAtMillis)
+  local queueAfterCurrent = options.queueAfterCurrent and true or false
+  local startAtMillis = queueAfterCurrent and nil or preparedAudioStartMillis(options.startAtMillis)
   local base = {
     op = "audio_stream",
     streamId = streamId,
@@ -3269,6 +3348,7 @@ function broadcastPreparedAudio(kind, pcm, options)
     totalChunks = totalChunks,
     allowDuringAlarm = options.allowDuringAlarm and true or false,
     clearExisting = options.clearExisting ~= false,
+    queueAfterCurrent = queueAfterCurrent,
   }
 
   local sentAll = true
@@ -3295,13 +3375,16 @@ function broadcastPreparedAudio(kind, pcm, options)
       samples = packPcmSamples(pcm, firstIndex, lastIndex),
       sampleEncoding = "s8",
       startAtMillis = startAtMillis,
+      queueAfterCurrent = queueAfterCurrent,
     })
     if chunkIndex % yieldChunks == 0 then
       sleep(yieldSeconds)
     end
   end
 
-  startAtMillis = preparedAudioStartMillis(startAtMillis)
+  if not queueAfterCurrent then
+    startAtMillis = preparedAudioStartMillis(startAtMillis)
+  end
   local finishMessage = shallowCopy(base)
   finishMessage.action = "finish"
   finishMessage.startAtMillis = startAtMillis
@@ -3347,6 +3430,10 @@ function alarmFeedSpeakerStream(speakerName)
 
   if stream.queueComplete then
     local queuedUntil = tonumber(stream.queuedUntil) or os.clock()
+    if state.alarm.pendingAudioStreams and state.alarm.pendingAudioStreams[speakerName] then
+      state.alarm.audioStreams[speakerName] = nil
+      return promotePendingAlarmStream(speakerName, queuedUntil)
+    end
     if os.clock() >= queuedUntil + (tonumber(stream.tailSeconds) or 0.5) then
       state.alarm.audioStreams[speakerName] = nil
       return false
@@ -3398,6 +3485,11 @@ function alarmFeedSpeakerStream(speakerName)
   if stream.nextIndex > #stream.pcm then
     stream.queueComplete = true
     stream.deadline = math.max(tonumber(stream.deadline) or 0, (tonumber(stream.queuedUntil) or os.clock()) + (tonumber(stream.graceSeconds) or 30))
+    if state.alarm.pendingAudioStreams and state.alarm.pendingAudioStreams[speakerName] then
+      local queuedUntil = tonumber(stream.queuedUntil) or os.clock()
+      state.alarm.audioStreams[speakerName] = nil
+      return promotePendingAlarmStream(speakerName, queuedUntil)
+    end
   end
   return true
 end
@@ -3446,7 +3538,8 @@ function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume, optio
   end
 
   state.alarm.audioStreams = state.alarm.audioStreams or {}
-  state.alarm.audioStreams[speakerName] = {
+  state.alarm.pendingAudioStreams = state.alarm.pendingAudioStreams or {}
+  local stream = {
     name = speakerName,
     speaker = speaker,
     pcm = pcm,
@@ -3463,9 +3556,18 @@ function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume, optio
     refillSeconds = tonumber(audioConfig.refillSeconds) or 0.75,
     syncToleranceSeconds = tonumber(audioConfig.syncToleranceSeconds) or 0.08,
     syncSkipLate = audioConfig.syncSkipLate ~= false,
-    startAtMillis = options.startAtMillis,
+    startAtMillis = options.queueAfterCurrent and nil or options.startAtMillis,
     clampSamples = false,
   }
+
+  local existing = state.alarm.audioStreams[speakerName]
+  if existing and options.replaceExisting == false then
+    state.alarm.pendingAudioStreams[speakerName] = stream
+    alarmFeedSpeakerStream(speakerName)
+    return true
+  end
+
+  state.alarm.audioStreams[speakerName] = stream
 
   local queued = alarmFeedSpeakerStream(speakerName)
   return queued or state.alarm.audioStreams[speakerName] ~= nil
@@ -4095,11 +4197,16 @@ function playAlarmPulse()
     return false
   end
 
-  if alarmAudioBusy() or announcementAudioBusy() then
+  local profile = alarmProfile(state.alarm.profile)
+  if announcementAudioBusy() then
     return false
   end
 
-  local profile = alarmProfile(state.alarm.profile)
+  local preloadMode = alarmAudioBusy()
+  if preloadMode and not alarmCanPreloadNextPulse(profile) then
+    return false
+  end
+
   local sounds = profile.sounds or {}
   local soundIndex = state.alarm.soundIndex
   local sound = sounds[soundIndex] or sounds[1]
@@ -4113,43 +4220,61 @@ function playAlarmPulse()
 
   local audioBuffer = preparedAlarmSoundBuffer(profile, sound, soundIndex)
   local usePreparedAudio = preparedAudioBroadcastEnabled()
-  if audioBuffer and not usePreparedAudio then
+  if audioBuffer and not usePreparedAudio and not preloadMode then
     audioBuffer = alignAlarmPcmToSchedule(profile, audioBuffer)
   end
   local dsp = profile.dsp or {}
   local audioVolume = type(sound) == "table" and sound.volume or nil
   audioVolume = tonumber(audioVolume) or tonumber(profile.volume) or tonumber(dsp.volume) or 1
-  local streamStartAt = nil
+  local streamStartAt = usePreparedAudio and (not preloadMode) and (nowMillis() + preparedAudioLeadMillis()) or nil
+  local played = false
+
+  if audioBuffer and usePreparedAudio and not preloadMode then
+    streamStartAt = preparedAudioStartMillis(streamStartAt)
+  end
+
+  for _, entry in ipairs(findSpeakerEntries()) do
+    local speaker = entry.speaker
+    local speakerPlayed = false
+    if audioBuffer then
+      speakerPlayed = playAlarmBuffer(profile, speaker, audioBuffer, audioVolume, entry.name, {
+        startAtMillis = streamStartAt,
+        replaceExisting = not preloadMode,
+        queueAfterCurrent = preloadMode,
+      })
+      played = speakerPlayed or played
+    end
+    if not speakerPlayed and not usePreparedAudio then
+      speakerPlayed = playDspAlarm(profile, speaker)
+      played = speakerPlayed or played
+    end
+    if not speakerPlayed and not usePreparedAudio then
+      speakerPlayed = playMinecraftAlarmSound(speaker, sound)
+      played = speakerPlayed or played
+    end
+    if (not speakerPlayed) and (not usePreparedAudio) and speaker.playNote then
+      pcall(speaker.playNote, "pling", alarmSoundValue(sound, "volume", 2), alarmSoundValue(sound, "pitch", 1))
+    end
+  end
+
   if audioBuffer then
     local _, broadcastStartAt = broadcastPreparedAudio("alarm", audioBuffer, {
       profile = state.alarm.profile,
       volume = audioVolume,
       sampleRate = alarmAudioConfig(profile).sampleRate,
-      startAtMillis = usePreparedAudio and (nowMillis() + preparedAudioLeadMillis()) or nil,
-      clearExisting = true,
+      startAtMillis = streamStartAt,
+      clearExisting = not preloadMode,
+      queueAfterCurrent = preloadMode,
     })
-    streamStartAt = broadcastStartAt
-    if usePreparedAudio and streamStartAt then
+    if usePreparedAudio then
       local sampleRate = math.max(1, tonumber(alarmAudioConfig(profile).sampleRate) or 48000)
       local duration = #audioBuffer / sampleRate
-      state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, os.clock() + alarmDelayUntilMillis(streamStartAt) + duration)
-    end
-  end
-
-  for _, entry in ipairs(findSpeakerEntries()) do
-    local speaker = entry.speaker
-    local played = false
-    if audioBuffer then
-      played = playAlarmBuffer(profile, speaker, audioBuffer, audioVolume, entry.name, { startAtMillis = streamStartAt })
-    end
-    if not played and not usePreparedAudio then
-      played = playDspAlarm(profile, speaker)
-    end
-    if not played and not usePreparedAudio then
-      played = playMinecraftAlarmSound(speaker, sound)
-    end
-    if (not played) and (not usePreparedAudio) and speaker.playNote then
-      pcall(speaker.playNote, "pling", alarmSoundValue(sound, "volume", 2), alarmSoundValue(sound, "pitch", 1))
+      if preloadMode then
+        local base = math.max(tonumber(state.alarm.audioPlayingUntil) or os.clock(), os.clock())
+        state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, base + alarmLoopGap(profile) + duration)
+      elseif broadcastStartAt then
+        state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, os.clock() + alarmDelayUntilMillis(broadcastStartAt) + duration)
+      end
     end
   end
   return true
@@ -4161,7 +4286,14 @@ function alarmNextPulseDelay()
     return math.max(0.05, alarmDelayUntilMillis(state.alarm.soundStartAt))
   end
   if alarmAudioBusy() then
-    return math.max(0.1, ((tonumber(state.alarm.audioPlayingUntil) or os.clock()) - os.clock()) + alarmLoopGap(profile))
+    if not alarmHasPendingAudioStream() then
+      local remaining = (tonumber(state.alarm.audioPlayingUntil) or os.clock()) - os.clock()
+      local preloadDelay = remaining - alarmPreloadSeconds(profile)
+      if preloadDelay > 0 then
+        return math.max(0.05, preloadDelay)
+      end
+    end
+    return 0.1
   end
   if announcementAudioBusy() then
     return 0.2
@@ -5680,6 +5812,10 @@ end
 
 function handleControllerMessage(sender, message)
   if type(message) ~= "table" or not message.op then
+    return
+  end
+  if message.op == "network_reboot" then
+    handleNetworkRebootMessage(sender, message)
     return
   end
   if message.op == "audio_stream" then
@@ -7264,6 +7400,64 @@ function handleResetAlarmMessage(sender, message, reply)
   end
 end
 
+function networkRebootMessage(reason)
+  return {
+    op = "network_reboot",
+    reason = reason or "server command",
+    rebootAtMillis = nowMillis() + 750,
+  }
+end
+
+function broadcastNetworkReboot(reason)
+  if not (config and config.rednet and config.rednet.enabled and rednet) then
+    return false, "rednet unavailable"
+  end
+
+  openRednet()
+  local message = networkRebootMessage(reason)
+  local sentAny = false
+  local lastErr = nil
+  for _ = 1, 3 do
+    local ok, result = pcall(broadcastRednet, message)
+    if ok and result ~= false then
+      sentAny = true
+    else
+      lastErr = result or "broadcast failed"
+    end
+    sleep(0.1)
+  end
+  if not sentAny then
+    return false, lastErr or "broadcast failed"
+  end
+  audit("NETWORK_REBOOT", reason or "console")
+  return true
+end
+
+function rebootServerAfterNetworkBroadcast(reason)
+  local ok, err = broadcastNetworkReboot(reason)
+  if not ok then
+    return false, err
+  end
+  sleep(0.8)
+  os.reboot()
+  return true
+end
+
+function handleNetworkRebootMessage(sender, message)
+  if type(message) ~= "table" or not serverSenderAllowed(sender) then
+    return false
+  end
+
+  updateKioskClockOffset(message, sender)
+  local rebootAt = serverMillisToLocalMillis(message.rebootAtMillis) or (nowMillis() + 250)
+  local delay = math.max(0, (rebootAt - nowMillis()) / 1000)
+  if delay > 0 then
+    sleep(math.min(delay, 3))
+  end
+  os.reboot()
+  return true
+end
+
 function handleRednetOperation(sender, message, reply)
   local op = message.op
   if op == "status" then
@@ -8143,6 +8337,7 @@ function printHelp()
     "  employee disable <user>",
     "  employee enable <user>",
     "  save",
+    "  reboot [network|clients|server]",
     "  quit",
     "",
     "Paged output uses Enter/N for next, P for previous, and Q to close.",
@@ -8718,6 +8913,27 @@ function handleCommand(line)
       saveConfig()
       print("Saved " .. CONFIG_FILE)
     end
+  elseif command == "reboot" then
+    if requireAdmin() then
+      local target = string.lower(tostring(words[2] or "network"))
+      if target == "network" or target == "all" or target == "everything" then
+        print("Broadcasting reboot to network, then rebooting server...")
+        local ok, err = rebootServerAfterNetworkBroadcast("console")
+        if not ok then
+          print("Network reboot failed: " .. tostring(err))
+        end
+      elseif target == "clients" or target == "kiosks" or target == "remotes" then
+        local ok, err = broadcastNetworkReboot("console")
+        print(ok and "Reboot broadcast sent" or ("Reboot broadcast failed: " .. tostring(err)))
+      elseif target == "server" then
+        audit("SERVER_REBOOT", "console")
+        print("Rebooting server...")
+        sleep(0.2)
+        os.reboot()
+      else
+        print("Usage: reboot [network|clients|server]")
+      end
+    end
   elseif command == "quit" or command == "exit" then
     if requireAdmin() then
       state.running = false
@@ -8950,7 +9166,9 @@ function kioskApplyAlarmMessage(message, sender)
       state.kiosk.lastAlarmSound = 0
       state.alarm.soundIndex = 1
     elseif (not wasActive) or oldProfile ~= state.alarm.profile or oldStartAt ~= tonumber(state.alarm.soundStartAt) then
-      clearAlarmAudioStreams(not announcementAudioBusy())
+      if not kioskServerPreparedAudioOnly() or not alarmAudioBusy() then
+        clearAlarmAudioStreams(not announcementAudioBusy())
+      end
       state.kiosk.lastAlarmSound = 0
       state.alarm.soundIndex = 1
     end
@@ -9020,7 +9238,9 @@ function kioskRequest(serverId, op, payload, timeout)
     if not okReceive then
       return { ok = false, error = receiveErr }
     end
-    if type(message) == "table" and message.op == "audio_stream" then
+    if type(message) == "table" and message.op == "network_reboot" then
+      handleNetworkRebootMessage(sender, message)
+    elseif type(message) == "table" and message.op == "audio_stream" then
       handlePreparedAudioMessage(message, sender)
     elseif type(message) == "table" and message.op == "alarm_state" then
       kioskApplyAlarmMessage(message, sender)
@@ -9077,7 +9297,9 @@ function discoverServer()
     if not okReceive then
       return nil, displayBranding(), nil
     end
-    if type(message) == "table" and message.op == "audio_stream" then
+    if type(message) == "table" and message.op == "network_reboot" then
+      handleNetworkRebootMessage(sender, message)
+    elseif type(message) == "table" and message.op == "audio_stream" then
       handlePreparedAudioMessage(message, sender)
     elseif type(message) == "table" and message.ok and message.branding then
       kioskApplyAlarmMessage(message, sender)
@@ -9097,7 +9319,9 @@ function kioskNetworkLoop()
     else
       local ok, sender, message = receiveRednet(0.5)
       if ok and type(message) == "table" then
-        if kioskControllerEnabled() and (message.op == "controller_endpoint" or message.op == "controller_scan" or message.op == "controller_ping") then
+        if message.op == "network_reboot" then
+          handleNetworkRebootMessage(sender, message)
+        elseif kioskControllerEnabled() and (message.op == "controller_endpoint" or message.op == "controller_scan" or message.op == "controller_ping") then
           handleControllerMessage(sender, message)
         elseif message.op == "audio_stream" then
           handlePreparedAudioMessage(message, sender)
@@ -9138,7 +9362,9 @@ function kioskHandleRawRednetMessage(sender, message, protocol)
   end
 
   if type(message) == "table" then
-    if kioskControllerEnabled() and (message.op == "controller_endpoint" or message.op == "controller_scan" or message.op == "controller_ping") then
+    if message.op == "network_reboot" then
+      handleNetworkRebootMessage(sender, message)
+    elseif kioskControllerEnabled() and (message.op == "controller_endpoint" or message.op == "controller_scan" or message.op == "controller_ping") then
       handleControllerMessage(sender, message)
     elseif message.op == "audio_stream" then
       handlePreparedAudioMessage(message, sender)
@@ -9168,7 +9394,8 @@ function kioskAlarmSpeakerLoop()
         state.kiosk.lastAlarmSound = 0
         sleepSeconds = math.max(0.01, math.min(0.05, alarmDelayUntilMillis(state.alarm.soundStartAt)))
       elseif alarmAudioBusy() then
-        sleepSeconds = 0.1
+        playAlarmPulse()
+        sleepSeconds = math.max(0.05, math.min(0.25, alarmNextPulseDelay()))
       else
         local elapsed = os.clock() - (state.kiosk.lastAlarmSound or 0)
         if elapsed >= interval then
@@ -10520,9 +10747,7 @@ function eventLoop()
           scheduleAnnouncementTimer()
         elseif payload.type == "alarm_pulse" then
           if state.alarm.active and (payload.generation == nil or payload.generation == state.alarm.audioGeneration) then
-            if not alarmAudioBusy() then
-              playAlarmPulse()
-            end
+            playAlarmPulse()
             scheduleAlarmPulse()
           end
         elseif payload.type == "door_lock" then

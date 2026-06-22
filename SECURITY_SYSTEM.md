@@ -70,6 +70,8 @@ Kiosks that are not currently acting as door controllers use `kiosk.controller.i
 
 Use the server console command `setup` after an admin `login <admin-pin>` to configure facility hardware from the terminal. The setup wizard can scan server peripherals, scan a remote door controller, add or update doors, remove doors, add/remove facility sensors, add/remove emergency buttons, add/remove generators, and map/remove reader sources. Each change is saved to `security_config.lua` immediately.
 
+Use `reboot network` after `login <admin-pin>` to broadcast a reboot to kiosks/controllers and then reboot the server. `reboot clients` only reboots remote computers, and `reboot server` only reboots the server.
+
 Kiosks also expose `Facility setup` for employees whose clearance meets `employees.permissions.setupFacility`, default C5. The kiosk sends setup requests to the server with the logged-in session token, and the server enforces the clearance before changing config.
 
 An authorized kiosk can also make itself a permanent door controller from `Facility setup` -> `This kiosk door-controller mode`. This keeps the employee kiosk UI running, saves `kiosk.controller.enabled = true` in the kiosk's local `security_config.lua`, answers server endpoint read/write/scan requests, and forwards local RFID/NFC/card scans as controller reader sources. The auto-updater preserves the local `kiosk.controller` block in `security_local_data.lua`, so permanent controller mode survives GitHub config refreshes.
