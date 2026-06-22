@@ -389,7 +389,7 @@ function installKioskConfigIfMissing()
   handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
   handle.writeLine("  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.5, idlePollSeconds = 5 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 6000, remoteAudioLeadSeconds = 0.75, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 2048, remoteAudioLeadSeconds = 0.75, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
@@ -1694,9 +1694,15 @@ function broadcastKioskNotification(notification, targetUser)
     local announcements = config.announcements or {}
     playOnServer = announcements.serverPlayback ~= false and announcements.localPlayback ~= false
   end
+  local playedBeforeNotify = false
+  if playOnServer and useAnnouncementAudio and not targetUser then
+    notification.serverPreparedAudio = false
+    pcall(playFacilityAnnouncement, notification)
+    playedBeforeNotify = true
+  end
 
   if not (config and config.rednet and config.rednet.enabled and rednet) then
-    if playOnServer then
+    if playOnServer and not playedBeforeNotify then
       pcall(playFacilityAnnouncement, notification)
     end
     return
@@ -1717,7 +1723,7 @@ function broadcastKioskNotification(notification, targetUser)
     notification = notification,
     serverTimeMillis = nowMillis(),
   })
-  if playOnServer then
+  if playOnServer and not playedBeforeNotify then
     pcall(playFacilityAnnouncement, notification)
   end
 end
@@ -2845,7 +2851,7 @@ function preparedAudioConfig()
       and announcements.remoteAudio ~= false
       and announcements.networkAudio ~= false,
     clientSynthesis = announcements.clientAudioSynthesis == true or announcements.localAudioSynthesis == true,
-    chunkSamples = tonumber(audio.networkChunkSamples or announcements.networkChunkSamples or announcements.remoteAudioChunkSamples) or 6000,
+    chunkSamples = tonumber(audio.networkChunkSamples or announcements.networkChunkSamples or announcements.remoteAudioChunkSamples) or 2048,
     leadSeconds = tonumber(audio.networkLeadSeconds or announcements.networkLeadSeconds or announcements.remoteAudioLeadSeconds) or 0.75,
     streamTtlSeconds = tonumber(audio.networkStreamTtlSeconds or announcements.networkStreamTtlSeconds) or 45,
   }
@@ -2869,7 +2875,7 @@ function kioskServerPreparedAudioOnly()
 end
 
 function preparedAudioChunkSamples()
-  local chunkSamples = math.floor(tonumber(preparedAudioConfig().chunkSamples) or 6000)
+  local chunkSamples = math.floor(tonumber(preparedAudioConfig().chunkSamples) or 2048)
   if chunkSamples < 512 then
     return 512
   end
@@ -2915,6 +2921,16 @@ function appendPackedPcmSamples(buffer, packed)
   local offset = #buffer
   for index = 1, #packed do
     buffer[offset + index] = (string.byte(packed, index) or 128) - 128
+  end
+end
+
+function appendPcmSampleTable(buffer, samples)
+  if type(samples) ~= "table" then
+    return
+  end
+  local offset = #buffer
+  for index = 1, #samples do
+    buffer[offset + index] = clampSample(samples[index])
   end
 end
 
@@ -2972,10 +2988,13 @@ function remoteAudioSamples(stream)
   local pcm = {}
   for index = 1, totalChunks do
     local chunk = stream.chunks[index]
-    if type(chunk) ~= "string" then
+    if type(chunk) == "string" then
+      appendPackedPcmSamples(pcm, chunk)
+    elseif type(chunk) == "table" then
+      appendPcmSampleTable(pcm, chunk)
+    else
       return nil
     end
-    appendPackedPcmSamples(pcm, chunk)
   end
   return pcm
 end
@@ -3067,7 +3086,7 @@ function handlePreparedAudioMessage(message, sender)
     return true
   elseif action == "chunk" then
     local index = math.floor(tonumber(message.index or message.chunkIndex) or 0)
-    if index > 0 and type(message.samples) == "string" then
+    if index > 0 and (type(message.samples) == "string" or type(message.samples) == "table") then
       if stream.chunks[index] == nil then
         stream.receivedChunks = (tonumber(stream.receivedChunks) or 0) + 1
       end
@@ -3123,28 +3142,36 @@ function broadcastPreparedAudio(kind, pcm, options)
     clearExisting = options.clearExisting ~= false,
   }
 
+  local sentAll = true
+  local function sendPreparedAudioMessage(message)
+    local ok, sent = pcall(broadcastRednet, message)
+    if not ok or sent == false then
+      sentAll = false
+    end
+  end
+
   local startMessage = shallowCopy(base)
   startMessage.action = "start"
-  pcall(broadcastRednet, startMessage)
+  sendPreparedAudioMessage(startMessage)
 
   for chunkIndex = 1, totalChunks do
     local firstIndex = ((chunkIndex - 1) * chunkSamples) + 1
     local lastIndex = math.min(#pcm, firstIndex + chunkSamples - 1)
-    pcall(broadcastRednet, {
+    sendPreparedAudioMessage({
       op = "audio_stream",
       action = "chunk",
       streamId = streamId,
       index = chunkIndex,
       totalChunks = totalChunks,
-      samples = packPcmSamples(pcm, firstIndex, lastIndex),
+      samples = pcmChunk(pcm, firstIndex, lastIndex, true),
       startAtMillis = startAtMillis,
     })
   end
 
   local finishMessage = shallowCopy(base)
   finishMessage.action = "finish"
-  pcall(broadcastRednet, finishMessage)
-  return true, startAtMillis
+  sendPreparedAudioMessage(finishMessage)
+  return sentAll, startAtMillis
 end
 
 function alarmFeedSpeakerStream(speakerName)
@@ -3803,6 +3830,9 @@ function playFacilityAnnouncement(announcement, options)
   local allowDuringAlarm = announcementCanPlayDuringAlarm(announcement) and announcements.alarmAnnouncements ~= false
   if alarmAnnouncementSuppressionActive() and not allowDuringAlarm then
     if not options.fromQueue then
+      if type(announcement) == "table" then
+        announcement.serverPreparedAudio = preparedAudioBroadcastEnabled()
+      end
       return queueFacilityAnnouncement(announcement)
     end
     return false
@@ -3811,6 +3841,9 @@ function playFacilityAnnouncement(announcement, options)
     if allowDuringAlarm then
       clearAnnouncementAudioStreams(true)
     elseif not options.fromQueue then
+      if type(announcement) == "table" then
+        announcement.serverPreparedAudio = preparedAudioBroadcastEnabled()
+      end
       return queueFacilityAnnouncement(announcement)
     else
       return false
@@ -3845,6 +3878,9 @@ function playFacilityAnnouncement(announcement, options)
     allowDuringAlarm = allowDuringAlarm,
     clearExisting = true,
   })
+  if type(announcement) == "table" then
+    announcement.serverPreparedAudio = remoteBroadcasted and true or false
+  end
   startAtMillis = remoteStartAt or startAtMillis
   if remoteStartAt and preparedAudioBroadcastEnabled() then
     local sampleRate = math.max(1, tonumber(audioConfig.sampleRate) or 48000)
@@ -8713,7 +8749,7 @@ function kioskApplyNotification(notification, sender, envelope)
 
   local item = kioskNotifications.push(state.kiosk, notification, config.notifications and config.notifications.maxItems)
   if item then
-    local serverAudioOnly = kioskServerPreparedAudioOnly()
+    local serverAudioOnly = kioskServerPreparedAudioOnly() and item.serverPreparedAudio == true
     if item.alarm and (item.kind == "alarm" or item.kind == "emergency") then
       kioskApplyAlarmMessage({
         alarm = item.alarm,

@@ -203,7 +203,7 @@ return {
     serverPlayback = true,
     serverPreparedAudio = true,
     clientAudioSynthesis = false,
-    remoteAudioChunkSamples = 6000,
+    remoteAudioChunkSamples = 2048,
     remoteAudioLeadSeconds = 0.75,
     alarmAnnouncements = true,
     queueLimit = 12,
