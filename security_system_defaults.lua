@@ -613,7 +613,7 @@ return {
     sampleRate = 48000,
     maxSamples = 128000,
     audio = {
-      chunkSamples = 128000,
+      chunkSamples = 24000,
       loopGapSeconds = 0.05,
     },
     syncAssets = true,

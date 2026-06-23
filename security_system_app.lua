@@ -2632,7 +2632,7 @@ function alarmAudioConfig(profile)
   return {
     sampleRate = audio.sampleRate or profile.sampleRate or dsp.sampleRate or 48000,
     maxSamples = audio.maxSamples or profile.maxSamples or dsp.maxSamples or 128000,
-    chunkSamples = audio.chunkSamples or profile.chunkSamples or audio.playbackSamples or profile.playbackSamples or 128000,
+    chunkSamples = audio.chunkSamples or profile.chunkSamples or audio.playbackSamples or profile.playbackSamples or 24000,
     loopGapSeconds = audio.loopGapSeconds or profile.loopGapSeconds or 0.05,
     streamGraceSeconds = audio.streamGraceSeconds or profile.streamGraceSeconds or announcements.streamGraceSeconds or 30,
     tailSeconds = audio.tailSeconds or profile.tailSeconds or announcements.tailSeconds or 0.5,
@@ -2660,6 +2660,9 @@ function appendAlarmSamples(buffer, samples)
   end
   for index = 1, #samples do
     buffer[#buffer + 1] = clampSample(samples[index])
+    if index % 4096 == 0 then
+      cooperativeAudioYield()
+    end
   end
 end
 
@@ -2792,15 +2795,15 @@ end
 
 function alarmPlaybackChunkSize(profile)
   local audioConfig = alarmAudioConfig(profile)
-  local chunkSamples = tonumber(audioConfig.chunkSamples) or tonumber(audioConfig.maxSamples) or 128000
+  local chunkSamples = tonumber(audioConfig.chunkSamples) or 24000
   if chunkSamples <= 0 then
-    chunkSamples = 128000
+    chunkSamples = 24000
   end
   chunkSamples = math.floor(chunkSamples)
   if chunkSamples < 1024 then
     chunkSamples = 1024
-  elseif chunkSamples > 128000 then
-    chunkSamples = 128000
+  elseif chunkSamples > 48000 then
+    chunkSamples = 48000
   end
   return chunkSamples
 end
@@ -3053,6 +3056,12 @@ function preparedAudioStartMillis(startAtMillis)
   return startAt
 end
 
+function cooperativeAudioYield()
+  if sleep then
+    sleep(0)
+  end
+end
+
 function packPcmSamples(pcm, firstIndex, lastIndex)
   local out = {}
   local block = {}
@@ -3077,6 +3086,7 @@ function appendPackedPcmSamples(buffer, packed)
     return
   end
   local offset = #buffer
+  local blocks = 0
   for index = 1, #packed, 256 do
     local last = math.min(#packed, index + 255)
     local bytes = { string.byte(packed, index, last) }
@@ -3084,6 +3094,10 @@ function appendPackedPcmSamples(buffer, packed)
       buffer[offset + byteIndex] = (bytes[byteIndex] or 128) - 128
     end
     offset = offset + #bytes
+    blocks = blocks + 1
+    if blocks % 16 == 0 then
+      cooperativeAudioYield()
+    end
   end
 end
 
@@ -3118,6 +3132,9 @@ function appendPcmSampleTable(buffer, samples)
   local offset = #buffer
   for index = 1, #samples do
     buffer[offset + index] = clampSample(samples[index])
+    if index % 4096 == 0 then
+      cooperativeAudioYield()
+    end
   end
 end
 
@@ -3182,6 +3199,9 @@ function remoteAudioSamples(stream)
     else
       return nil
     end
+    if index % 4 == 0 then
+      cooperativeAudioYield()
+    end
   end
   return pcm
 end
@@ -3205,6 +3225,15 @@ function startPreparedAudioPlayback(stream)
   local played = false
 
   if kind == "alarm" then
+    if not state.alarm.active then
+      state.alarm.active = true
+      state.alarm.profile = stream.profile or state.alarm.profile
+      state.alarm.sinceMillis = nowMillis()
+      state.alarm.soundStartAt = startAtMillis or nowMillis()
+      state.alarm.soundIndex = 1
+    elseif stream.profile and state.alarm.profile ~= stream.profile then
+      state.alarm.profile = stream.profile
+    end
     if stream.clearExisting ~= false then
       clearAlarmAudioStreams(not announcementAudioBusy())
     end

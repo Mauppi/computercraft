@@ -8,6 +8,12 @@ local wavCacheOrder = {}
 local wavCacheSerial = 0
 local wavCacheSamples = 0
 
+local function cooperativeYield()
+  if sleep then
+    sleep(0)
+  end
+end
+
 local function combinePath(base, path)
   base = string.gsub(tostring(base or ""), "\\", "/")
   path = string.gsub(tostring(path or ""), "\\", "/")
@@ -123,6 +129,9 @@ local function appendSamples(buffer, samples, gain)
   gain = tonumber(gain) or 1
   for index = 1, #samples do
     buffer[#buffer + 1] = clamp(samples[index] * gain)
+    if index % 8192 == 0 then
+      cooperativeYield()
+    end
   end
 end
 
@@ -135,10 +144,16 @@ local function mixSamplesAt(buffer, samples, startIndex, gain)
   gain = tonumber(gain) or 1
   for index = #buffer + 1, startIndex - 1 do
     buffer[index] = 0
+    if index % 8192 == 0 then
+      cooperativeYield()
+    end
   end
   for index = 1, #samples do
     local target = startIndex + index - 1
     buffer[target] = clamp((buffer[target] or 0) + (samples[index] * gain))
+    if index % 8192 == 0 then
+      cooperativeYield()
+    end
   end
 end
 
@@ -239,6 +254,9 @@ local function resample(samples, fromRate, toRate)
     end
     local fraction = source - left
     out[index] = clamp((samples[left] or 0) + (((samples[right] or samples[left] or 0) - (samples[left] or 0)) * fraction))
+    if index % 8192 == 0 then
+      cooperativeYield()
+    end
   end
   return out
 end
@@ -254,6 +272,9 @@ local function scaledSamples(samples, gain)
   local out = {}
   for index = 1, #samples do
     out[index] = clamp(samples[index] * gain)
+    if index % 8192 == 0 then
+      cooperativeYield()
+    end
   end
   return out
 end
@@ -327,11 +348,17 @@ function M.loadWav(path, config)
     for frame = dataStart, last - frameSize, frameSize do
       samples[outIndex] = (string.byte(data, frame) or 128) - 128
       outIndex = outIndex + 1
+      if outIndex % 8192 == 0 then
+        cooperativeYield()
+      end
     end
   elseif fmt.channels == 1 and fmt.bits == 16 then
     for frame = dataStart, last - frameSize, frameSize do
       samples[outIndex] = math.floor(s16le(data, frame) / 256)
       outIndex = outIndex + 1
+      if outIndex % 8192 == 0 then
+        cooperativeYield()
+      end
     end
   else
     for frame = dataStart, last - frameSize, frameSize do
@@ -346,6 +373,9 @@ function M.loadWav(path, config)
       end
       samples[outIndex] = clamp(total / fmt.channels)
       outIndex = outIndex + 1
+      if outIndex % 8192 == 0 then
+        cooperativeYield()
+      end
     end
   end
 
