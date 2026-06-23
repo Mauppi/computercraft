@@ -387,7 +387,7 @@ function installKioskConfigIfMissing()
   end
   handle.writeLine("return {")
   handle.writeLine("  mode = \"kiosk\",")
-  handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false } },")
+  handle.writeLine("  rednet = { enabled = true, protocol = \"cc_security_v1\", serverId = nil, discoverySeconds = 3, encryption = { enabled = false, key = \"change-this-facility-key\", allowPlaintext = false, audioPlaintext = true } },")
   handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
   handle.writeLine("  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.5, idlePollSeconds = 5 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
@@ -3008,7 +3008,8 @@ function preparedAudioChunkSamples()
   if chunkSamples < 512 then
     return 512
   end
-  if secureRednet.enabled(config and config.rednet or {}) and chunkSamples > 2048 then
+  local rednetConfig = config and config.rednet or {}
+  if secureRednet.enabled(rednetConfig) and not secureRednet.audioPlaintext(rednetConfig) and chunkSamples > 2048 then
     chunkSamples = 2048
   end
   if chunkSamples > 4096 then
@@ -3081,7 +3082,7 @@ function packPcmSamples(pcm, firstIndex, lastIndex)
   return table.concat(out)
 end
 
-function appendPackedPcmSamples(buffer, packed)
+function appendPackedPcmSamples(buffer, packed, allowYield)
   if type(packed) ~= "string" then
     return
   end
@@ -3095,7 +3096,7 @@ function appendPackedPcmSamples(buffer, packed)
     end
     offset = offset + #bytes
     blocks = blocks + 1
-    if blocks % 16 == 0 then
+    if allowYield and blocks % 16 == 0 then
       cooperativeAudioYield()
     end
   end
@@ -3125,14 +3126,14 @@ function promotePendingAlarmStream(speakerName, previousQueuedUntil)
   return alarmFeedSpeakerStream(speakerName)
 end
 
-function appendPcmSampleTable(buffer, samples)
+function appendPcmSampleTable(buffer, samples, allowYield)
   if type(samples) ~= "table" then
     return
   end
   local offset = #buffer
   for index = 1, #samples do
     buffer[offset + index] = clampSample(samples[index])
-    if index % 4096 == 0 then
+    if allowYield and index % 4096 == 0 then
       cooperativeAudioYield()
     end
   end
@@ -3193,9 +3194,9 @@ function remoteAudioSamples(stream)
   for index = 1, totalChunks do
     local chunk = stream.chunks[index]
     if type(chunk) == "string" then
-      appendPackedPcmSamples(pcm, chunk)
+      appendPackedPcmSamples(pcm, chunk, true)
     elseif type(chunk) == "table" then
-      appendPcmSampleTable(pcm, chunk)
+      appendPcmSampleTable(pcm, chunk, true)
     else
       return nil
     end
@@ -3206,10 +3207,189 @@ function remoteAudioSamples(stream)
   return pcm
 end
 
+function remoteAudioKind(stream)
+  return tostring(stream and stream.kind or "announcement")
+end
+
+function queueRemoteAudioWork()
+  state.remoteAudio = state.remoteAudio or { streams = {} }
+  if state.remoteAudio.workQueued then
+    return
+  end
+  state.remoteAudio.workQueued = true
+  if os and os.queueEvent then
+    os.queueEvent("security_audio_work")
+  end
+end
+
+function appendRemoteAudioReadyChunks(stream, maxChunks)
+  if type(stream) ~= "table" or type(stream.chunks) ~= "table" then
+    return false
+  end
+  local totalChunks = math.floor(tonumber(stream.totalChunks) or 0)
+  if totalChunks <= 0 then
+    return false
+  end
+
+  stream.pcm = stream.pcm or {}
+  stream.nextAppendChunk = math.max(1, math.floor(tonumber(stream.nextAppendChunk) or 1))
+
+  local appended = false
+  local processed = 0
+  local limit = math.max(1, math.floor(tonumber(maxChunks) or 4))
+  while stream.nextAppendChunk <= totalChunks and processed < limit do
+    local chunkIndex = stream.nextAppendChunk
+    local chunk = stream.chunks[chunkIndex]
+    if chunk == nil then
+      break
+    end
+    if type(chunk) == "string" then
+      appendPackedPcmSamples(stream.pcm, chunk)
+    elseif type(chunk) == "table" then
+      appendPcmSampleTable(stream.pcm, chunk)
+    else
+      break
+    end
+    stream.chunks[chunkIndex] = nil
+    stream.nextAppendChunk = chunkIndex + 1
+    processed = processed + 1
+    appended = true
+  end
+
+  stream.appendComplete = stream.nextAppendChunk > totalChunks
+  if stream.nextAppendChunk <= totalChunks and stream.chunks[stream.nextAppendChunk] ~= nil then
+    queueRemoteAudioWork()
+  end
+  return appended
+end
+
+function alarmRemoteSourceFinished(source, availableSamples)
+  if type(source) ~= "table" then
+    return true
+  end
+  if source.appendComplete then
+    return true
+  end
+  local totalSamples = tonumber(source.totalSamples)
+  if totalSamples and tonumber(availableSamples) and availableSamples >= totalSamples then
+    return true
+  end
+  return false
+end
+
+function alarmStreamSourceFinished(stream)
+  if type(stream) ~= "table" then
+    return true
+  end
+  local availableSamples = type(stream.pcm) == "table" and #stream.pcm or 0
+  if stream.source then
+    return alarmRemoteSourceFinished(stream.source, availableSamples)
+  end
+  if stream.sourceFinished ~= nil then
+    return stream.sourceFinished and true or false
+  end
+  local expectedSamples = tonumber(stream.expectedSamples)
+  if expectedSamples and availableSamples < expectedSamples then
+    return false
+  end
+  return true
+end
+
+function remoteAlarmMinStartSamples(source, profile)
+  local audioConfig = alarmAudioConfig(profile)
+  local sampleRate = tonumber(source and source.sampleRate or audioConfig.sampleRate) or 48000
+  if sampleRate <= 0 then
+    sampleRate = 48000
+  end
+  local minimum = math.max(alarmPlaybackChunkSize(profile), math.floor((sampleRate * 0.25) + 0.5))
+  local totalSamples = tonumber(source and source.totalSamples)
+  if totalSamples and totalSamples > 0 then
+    minimum = math.min(minimum, totalSamples)
+  end
+  return math.max(1, minimum)
+end
+
+function updateRemoteAlarmSpeakerStreams(source)
+  if type(source) ~= "table" then
+    return
+  end
+  local function update(streams)
+    for _, speakerStream in pairs(streams or {}) do
+      if speakerStream.source == source then
+        speakerStream.sourceFinished = alarmRemoteSourceFinished(source, type(speakerStream.pcm) == "table" and #speakerStream.pcm or 0)
+        speakerStream.expectedSamples = tonumber(source.totalSamples) or speakerStream.expectedSamples
+      end
+    end
+  end
+  update(state.alarm.audioStreams)
+  update(state.alarm.pendingAudioStreams)
+end
+
+function startPreparedAlarmAudioPlayback(stream)
+  if type(stream) ~= "table" or stream.played then
+    return false
+  end
+
+  appendRemoteAudioReadyChunks(stream, 6)
+  if not (type(stream.pcm) == "table" and #stream.pcm > 0) then
+    return false
+  end
+
+  local startAtMillis = stream.queueAfterCurrent and nil or serverMillisToLocalMillis(stream.startAtMillis)
+  local volume = tonumber(stream.volume) or 1
+
+  if not state.alarm.active then
+    state.alarm.active = true
+    state.alarm.profile = stream.profile or state.alarm.profile
+    state.alarm.sinceMillis = nowMillis()
+    state.alarm.soundStartAt = startAtMillis or nowMillis()
+    state.alarm.soundIndex = 1
+  elseif stream.profile and state.alarm.profile ~= stream.profile then
+    state.alarm.profile = stream.profile
+  end
+
+  if not stream.playbackStarted then
+    if stream.clearExisting ~= false and not stream.queueAfterCurrent then
+      clearAlarmAudioStreams(not announcementAudioBusy())
+    end
+    local profile = alarmProfile(stream.profile or state.alarm.profile)
+    local played = false
+    for _, entry in ipairs(findSpeakerEntries()) do
+      if startAlarmAudioStream(profile, entry.name, entry.speaker, stream.pcm, volume, {
+        startAtMillis = startAtMillis,
+        replaceExisting = stream.clearExisting ~= false,
+        queueAfterCurrent = stream.queueAfterCurrent and true or false,
+        source = stream,
+        sourceFinished = alarmRemoteSourceFinished(stream, #stream.pcm),
+        expectedSamples = tonumber(stream.totalSamples),
+        sampleRate = tonumber(stream.sampleRate),
+        minStartSamples = remoteAlarmMinStartSamples(stream, profile),
+        syncSkipLate = stream.appendComplete and nil or false,
+      }) then
+        played = true
+      end
+    end
+    stream.playbackStarted = played
+  else
+    updateRemoteAlarmSpeakerStreams(stream)
+    feedAlarmAudioStreams()
+  end
+
+  if stream.finished and stream.appendComplete and stream.playbackStarted then
+    stream.played = true
+  end
+  return stream.playbackStarted and true or false
+end
+
 function startPreparedAudioPlayback(stream)
   if type(stream) ~= "table" or stream.played then
     return false
   end
+
+  if remoteAudioKind(stream) == "alarm" then
+    return startPreparedAlarmAudioPlayback(stream)
+  end
+
   if not stream.finished or (tonumber(stream.receivedChunks) or 0) < (tonumber(stream.totalChunks) or 0) then
     return false
   end
@@ -3221,51 +3401,25 @@ function startPreparedAudioPlayback(stream)
 
   local startAtMillis = stream.queueAfterCurrent and nil or serverMillisToLocalMillis(stream.startAtMillis)
   local volume = tonumber(stream.volume) or 1
-  local kind = tostring(stream.kind or "announcement")
   local played = false
 
-  if kind == "alarm" then
-    if not state.alarm.active then
-      state.alarm.active = true
-      state.alarm.profile = stream.profile or state.alarm.profile
-      state.alarm.sinceMillis = nowMillis()
-      state.alarm.soundStartAt = startAtMillis or nowMillis()
-      state.alarm.soundIndex = 1
-    elseif stream.profile and state.alarm.profile ~= stream.profile then
-      state.alarm.profile = stream.profile
-    end
-    if stream.clearExisting ~= false then
-      clearAlarmAudioStreams(not announcementAudioBusy())
-    end
-    local profile = alarmProfile(stream.profile or state.alarm.profile)
-    for _, entry in ipairs(findSpeakerEntries()) do
-      if startAlarmAudioStream(profile, entry.name, entry.speaker, pcm, volume, {
-        startAtMillis = startAtMillis,
-        replaceExisting = stream.clearExisting ~= false,
-        queueAfterCurrent = stream.queueAfterCurrent and true or false,
-      }) then
-        played = true
-      end
-    end
-  else
-    local allowDuringAlarm = stream.allowDuringAlarm and true or false
-    if state.alarm.active and not allowDuringAlarm then
-      stream.played = true
-      return false
-    end
-    if stream.clearExisting ~= false then
-      clearAnnouncementAudioStreams(true)
-    end
-    local generation = state.announcements.audioGeneration or 0
-    for _, entry in ipairs(findSpeakerEntries()) do
-      if startAnnouncementAudioStream(entry.name, entry.speaker, pcm, volume, {
-        allowExisting = true,
-        allowDuringAlarm = allowDuringAlarm,
-        generation = generation,
-        startAtMillis = startAtMillis,
-      }) then
-        played = true
-      end
+  local allowDuringAlarm = stream.allowDuringAlarm and true or false
+  if state.alarm.active and not allowDuringAlarm then
+    stream.played = true
+    return false
+  end
+  if stream.clearExisting ~= false then
+    clearAnnouncementAudioStreams(true)
+  end
+  local generation = state.announcements.audioGeneration or 0
+  for _, entry in ipairs(findSpeakerEntries()) do
+    if startAnnouncementAudioStream(entry.name, entry.speaker, pcm, volume, {
+      allowExisting = true,
+      allowDuringAlarm = allowDuringAlarm,
+      generation = generation,
+      startAtMillis = startAtMillis,
+    }) then
+      played = true
     end
   end
 
@@ -3298,13 +3452,7 @@ function handlePreparedAudioMessage(message, sender)
     stream.clearExisting = message.clearExisting ~= false
     stream.queueAfterCurrent = message.queueAfterCurrent and true or false
     stream.finished = false
-    if stream.clearExisting then
-      if stream.kind == "alarm" then
-        clearAlarmAudioStreams(not announcementAudioBusy())
-      else
-        clearAnnouncementAudioStreams(true)
-      end
-    end
+    queueRemoteAudioWork()
     return true
   elseif action == "chunk" then
     local index = math.floor(tonumber(message.index or message.chunkIndex) or 0)
@@ -3319,7 +3467,8 @@ function handlePreparedAudioMessage(message, sender)
       if message.startAtMillis and not stream.finished then
         stream.startAtMillis = message.startAtMillis
       end
-      return startPreparedAudioPlayback(stream) or true
+      queueRemoteAudioWork()
+      return true
     end
   elseif action == "finish" or action == "end" then
     stream.kind = message.kind or stream.kind or "announcement"
@@ -3337,7 +3486,8 @@ function handlePreparedAudioMessage(message, sender)
     if message.clearExisting ~= nil then
       stream.clearExisting = message.clearExisting ~= false
     end
-    return startPreparedAudioPlayback(stream)
+    queueRemoteAudioWork()
+    return true
   elseif action == "stop" then
     if message.kind == "alarm" then
       clearAlarmAudioStreams(not announcementAudioBusy())
@@ -3349,6 +3499,33 @@ function handlePreparedAudioMessage(message, sender)
   end
 
   return false
+end
+
+function processRemoteAudioStreams()
+  state.remoteAudio = state.remoteAudio or { streams = {} }
+  state.remoteAudio.workQueued = false
+  cleanupRemoteAudioStreams()
+
+  local moreWork = false
+  for _, stream in pairs(state.remoteAudio.streams or {}) do
+    if remoteAudioKind(stream) == "alarm" then
+      appendRemoteAudioReadyChunks(stream, 6)
+      startPreparedAlarmAudioPlayback(stream)
+      updateRemoteAlarmSpeakerStreams(stream)
+      if not stream.appendComplete then
+        local nextIndex = math.max(1, math.floor(tonumber(stream.nextAppendChunk) or 1))
+        if stream.chunks and stream.chunks[nextIndex] ~= nil then
+          moreWork = true
+        end
+      end
+    elseif stream.finished and not stream.played then
+      startPreparedAudioPlayback(stream)
+    end
+  end
+
+  if moreWork then
+    queueRemoteAudioWork()
+  end
 end
 
 function broadcastPreparedAudio(kind, pcm, options)
@@ -3441,10 +3618,20 @@ function alarmFeedSpeakerStream(speakerName)
     return true
   end
 
+  if not stream.started and not alarmStreamSourceFinished(stream) then
+    local minimum = math.floor(tonumber(stream.minStartSamples) or 0)
+    local availableSamples = type(stream.pcm) == "table" and #stream.pcm or 0
+    if minimum > 0 and availableSamples < minimum then
+      local graceSeconds = tonumber(stream.graceSeconds) or 30
+      stream.deadline = math.max(tonumber(stream.deadline) or 0, os.clock() + graceSeconds)
+      return true
+    end
+  end
+
   if startAtMillis and not stream.started then
     local lateSeconds = (nowMillis() - startAtMillis) / 1000
     local toleranceSeconds = tonumber(stream.syncToleranceSeconds) or 0.08
-    if lateSeconds > math.max(0, toleranceSeconds) and stream.syncSkipLate ~= false then
+    if lateSeconds > math.max(0, toleranceSeconds) and stream.syncSkipLate ~= false and alarmStreamSourceFinished(stream) then
       local sampleRate = math.max(1, tonumber(stream.sampleRate) or 48000)
       local trimmed = trimPcmStart(stream.pcm, math.floor((lateSeconds * sampleRate) + 0.5))
       if not (type(trimmed) == "table" and #trimmed > 0) then
@@ -3473,12 +3660,21 @@ function alarmFeedSpeakerStream(speakerName)
   local fedChunks = 0
   local maxChunks = math.max(1, tonumber(stream.maxChunksPerFeed) or 2)
   local targetQueuedUntil = os.clock() + streamPrebufferSeconds(stream)
-  while stream.nextIndex <= #stream.pcm and fedChunks < maxChunks do
+  local availableSamples = type(stream.pcm) == "table" and #stream.pcm or 0
+  if stream.nextIndex > availableSamples then
+    if not alarmStreamSourceFinished(stream) then
+      local graceSeconds = tonumber(stream.graceSeconds) or 30
+      stream.deadline = math.max(tonumber(stream.deadline) or 0, os.clock() + graceSeconds)
+      return true
+    end
+  end
+
+  while stream.nextIndex <= availableSamples and fedChunks < maxChunks do
     if fedChunks > 0 and stream.queuedUntil and stream.queuedUntil >= targetQueuedUntil then
       break
     end
 
-    local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
+    local last = math.min(availableSamples, stream.nextIndex + stream.chunkSamples - 1)
     local chunk = pcmChunk(stream.pcm, stream.nextIndex, last, stream.clampSamples)
 
     stream.lastAttemptAt = os.clock()
@@ -3509,9 +3705,15 @@ function alarmFeedSpeakerStream(speakerName)
     stream.deadline = stream.queuedUntil + (tonumber(stream.graceSeconds) or 30)
     state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, stream.queuedUntil)
     fedChunks = fedChunks + 1
+    availableSamples = type(stream.pcm) == "table" and #stream.pcm or availableSamples
   end
 
-  if stream.nextIndex > #stream.pcm then
+  if stream.nextIndex > (type(stream.pcm) == "table" and #stream.pcm or 0) then
+    if not alarmStreamSourceFinished(stream) then
+      local graceSeconds = tonumber(stream.graceSeconds) or 30
+      stream.deadline = math.max(tonumber(stream.deadline) or 0, os.clock() + graceSeconds)
+      return true
+    end
     stream.queueComplete = true
     stream.deadline = math.max(tonumber(stream.deadline) or 0, (tonumber(stream.queuedUntil) or os.clock()) + (tonumber(stream.graceSeconds) or 30))
     if state.alarm.pendingAudioStreams and state.alarm.pendingAudioStreams[speakerName] then
@@ -3548,12 +3750,12 @@ function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume, optio
 
   speakerName = tostring(speakerName or "")
   local audioConfig = alarmAudioConfig(profile)
-  local sampleRate = tonumber(audioConfig.sampleRate) or 48000
+  local sampleRate = tonumber(options.sampleRate or audioConfig.sampleRate) or 48000
   if sampleRate <= 0 then
     sampleRate = 48000
   end
   local chunkSamples = alarmPlaybackChunkSize(profile)
-  local duration = alarmPcmDuration(profile, pcm)
+  local duration = #pcm / sampleRate
   local graceSeconds = tonumber(audioConfig.streamGraceSeconds) or 30
 
   if speakerName == "" then
@@ -3583,10 +3785,14 @@ function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume, optio
     maxChunksPerFeed = tonumber(audioConfig.maxChunksPerFeed) or 4,
     prebufferSeconds = tonumber(audioConfig.prebufferSeconds) or 2.5,
     refillSeconds = tonumber(audioConfig.refillSeconds) or 0.75,
-    syncToleranceSeconds = tonumber(audioConfig.syncToleranceSeconds) or 0.08,
-    syncSkipLate = audioConfig.syncSkipLate ~= false,
+    syncToleranceSeconds = tonumber(options.syncToleranceSeconds or audioConfig.syncToleranceSeconds) or 0.08,
+    syncSkipLate = options.syncSkipLate ~= nil and (options.syncSkipLate and true or false) or audioConfig.syncSkipLate ~= false,
     startAtMillis = options.queueAfterCurrent and nil or options.startAtMillis,
     clampSamples = false,
+    source = options.source,
+    sourceFinished = options.sourceFinished ~= false,
+    expectedSamples = tonumber(options.expectedSamples),
+    minStartSamples = tonumber(options.minStartSamples),
   }
 
   local existing = state.alarm.audioStreams[speakerName]
@@ -9452,11 +9658,18 @@ function alarmAudioStreamLoop()
   while state.running or state.kiosk.running do
     local event = { os.pullEventRaw() }
     if event[1] == "speaker_audio_empty" then
+      processRemoteAudioStreams()
       if not handleAlarmSpeakerAudioEmpty(event[2]) then
         handleAnnouncementSpeakerAudioEmpty(event[2])
       end
       processAnnouncementQueue()
+    elseif event[1] == "security_audio_work" then
+      processRemoteAudioStreams()
+      feedAlarmAudioStreams()
+      feedAnnouncementAudioStreams()
+      processAnnouncementQueue()
     elseif event[1] == "timer" and event[2] == watchdogTimer then
+      processRemoteAudioStreams()
       feedAlarmAudioStreams()
       feedAnnouncementAudioStreams()
       processAnnouncementQueue()

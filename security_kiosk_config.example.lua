@@ -18,6 +18,7 @@ return {
       enabled = true,
       key = "FAPKEY",
       allowPlaintext = false,
+      audioPlaintext = true,
     },
   },
 

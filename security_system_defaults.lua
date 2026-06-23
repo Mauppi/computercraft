@@ -43,6 +43,7 @@ return {
       enabled = false,
       key = "",
       allowPlaintext = false,
+      audioPlaintext = true,
     },
   },
 

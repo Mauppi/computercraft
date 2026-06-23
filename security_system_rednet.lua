@@ -54,7 +54,22 @@ local function settings(rednetConfig)
     enabled = enabled and key ~= "",
     key = key,
     allowPlaintext = encryption.allowPlaintext == true,
+    audioPlaintext = encryption.audioPlaintext ~= false and encryption.encryptAudioChunks ~= true,
   }
+end
+
+local function isAudioChunk(message)
+  if type(message) ~= "table" then
+    return false
+  end
+  if message.op ~= "audio_stream" then
+    return false
+  end
+  local action = tostring(message.action or message.phase or "")
+  if action ~= "chunk" then
+    return false
+  end
+  return type(message.samples) == "string" or type(message.samples) == "table"
 end
 
 local function encryptText(text, key, useNonce)
@@ -103,9 +118,17 @@ function M.enabled(rednetConfig)
   return settings(rednetConfig).enabled
 end
 
+function M.audioPlaintext(rednetConfig)
+  return settings(rednetConfig).audioPlaintext
+end
+
 function M.wrap(message, rednetConfig)
   local opts = settings(rednetConfig)
   if not opts.enabled then
+    return message
+  end
+  if opts.audioPlaintext and isAudioChunk(message) then
+    message.__securitySystemPlainAudio = "audio1"
     return message
   end
 
@@ -140,6 +163,10 @@ function M.unwrap(message, rednetConfig)
       return decoded
     end
     return nil, "encrypted message could not be decoded"
+  end
+
+  if opts.audioPlaintext and isAudioChunk(message) then
+    return message
   end
 
   if opts.enabled and not opts.allowPlaintext then
