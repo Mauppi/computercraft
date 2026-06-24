@@ -1420,10 +1420,18 @@ function lockDoor(doorId, reason, quiet)
   return ok, err
 end
 
+function peripheralLooksLikeSpeaker(name)
+  if hasPeripheralType(name, "speaker") then
+    return true
+  end
+  local methods = methodMap(name)
+  return methods.playAudio == true or methods.playSound == true or methods.playNote == true
+end
+
 function findSpeakers()
   local out = {}
   for _, name in ipairs(peripheralNames()) do
-    if hasPeripheralType(name, "speaker") then
+    if peripheralLooksLikeSpeaker(name) then
       local device = peripheral.wrap(name)
       if device then
         table.insert(out, device)
@@ -1436,7 +1444,7 @@ end
 function findSpeakerEntries()
   local out = {}
   for _, name in ipairs(peripheralNames()) do
-    if hasPeripheralType(name, "speaker") then
+    if peripheralLooksLikeSpeaker(name) then
       local device = peripheral.wrap(name)
       if device then
         table.insert(out, { name = name, speaker = device })
@@ -3824,6 +3832,10 @@ function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume, optio
   queueAudioStreamWork()
 
   local queued = alarmFeedSpeakerStream(speakerName)
+  if not stream.startAtMillis and not stream.queueComplete and (tonumber(stream.acceptedSamples) or 0) <= 0 then
+    state.alarm.audioStreams[speakerName] = nil
+    return false
+  end
   return queued or state.alarm.audioStreams[speakerName] ~= nil
 end
 
@@ -4481,6 +4493,7 @@ function playAlarmPulse()
   local audioVolume = type(sound) == "table" and sound.volume or nil
   audioVolume = tonumber(audioVolume) or tonumber(profile.volume) or tonumber(dsp.volume) or 1
   local streamStartAt = usePreparedAudio and (not preloadMode) and (nowMillis() + preparedAudioLeadMillis()) or nil
+  local localStartAt = nil
   local played = false
 
   if audioBuffer and usePreparedAudio and not preloadMode then
@@ -4492,10 +4505,10 @@ function playAlarmPulse()
     local speakerPlayed = false
     if audioBuffer then
       speakerPlayed = playAlarmBuffer(profile, speaker, audioBuffer, audioVolume, entry.name, {
-        startAtMillis = streamStartAt,
+        startAtMillis = localStartAt,
         replaceExisting = not preloadMode,
         queueAfterCurrent = preloadMode,
-        syncSkipLate = usePreparedAudio and false or nil,
+        syncSkipLate = false,
       })
       played = speakerPlayed or played
     end
@@ -4512,8 +4525,10 @@ function playAlarmPulse()
     end
   end
 
+  local remoteBroadcasted = false
   if audioBuffer then
-    local _, broadcastStartAt = broadcastPreparedAudio("alarm", audioBuffer, {
+    local broadcastStartAt
+    remoteBroadcasted, broadcastStartAt = broadcastPreparedAudio("alarm", audioBuffer, {
       profile = state.alarm.profile,
       volume = audioVolume,
       sampleRate = alarmAudioConfig(profile).sampleRate,
@@ -4532,7 +4547,7 @@ function playAlarmPulse()
       end
     end
   end
-  return true
+  return played or remoteBroadcasted
 end
 
 function alarmNextPulseDelay()
