@@ -684,6 +684,19 @@ return {
     autoDiscoverCreateStress = false,
     autoStressMaxLoad = 0.9,
     autoStressProfile = "power_fault",
+    hostileEntityDetection = {
+      enabled = true,
+      name = "Hostile Entity Detector",
+      type = "entity",
+      entities = { "minecraft:warden", "minecraft:wither" },
+      radius = 64,
+      profile = "emergency",
+      autoDiscover = true,
+      autoResetAlarm = true,
+      autoResetSeconds = 8,
+      -- Optional: set peripheral = "entityDetector_0" or method = "getEntitiesInRange"
+      -- if your extension exposes a different detector API.
+    },
 
     -- If remote sensor computers send facility_fault messages, set a key here
     -- and include it in those messages.

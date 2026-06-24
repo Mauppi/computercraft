@@ -97,6 +97,9 @@ local state = {
     pendingAudioStreams = {},
     audioGeneration = 0,
     audioPlayingUntil = 0,
+    sourceKey = nil,
+    sourceAutoReset = false,
+    sourceAutoResetAfter = nil,
   },
   lockdown = false,
   consoleAdminUntil = 0,
@@ -564,6 +567,12 @@ function applyDefaults(userConfig)
   for key, value in pairs(defaultConfig.facility) do
     if merged.facility[key] == nil then
       merged.facility[key] = shallowCopy(value)
+    end
+  end
+  merged.facility.hostileEntityDetection = merged.facility.hostileEntityDetection or shallowCopy(defaultConfig.facility.hostileEntityDetection or {})
+  for key, value in pairs(defaultConfig.facility.hostileEntityDetection or {}) do
+    if merged.facility.hostileEntityDetection[key] == nil then
+      merged.facility.hostileEntityDetection[key] = shallowCopy(value)
     end
   end
 
@@ -1526,6 +1535,8 @@ function alarmStatePayload()
       profile = state.alarm.profile,
       sinceMillis = state.alarm.sinceMillis,
       soundStartAt = state.alarm.soundStartAt,
+      sourceKey = state.alarm.sourceKey,
+      sourceAutoReset = state.alarm.sourceAutoReset,
     },
     lockdown = state.lockdown,
   }
@@ -4542,7 +4553,16 @@ function scheduleAlarmPulse()
   end
 end
 
-function raiseAlarm(reason, doorId, actor, profileName)
+function applyAlarmSourceOptions(options)
+  options = options or {}
+  state.alarm.sourceKey = options.sourceKey
+  state.alarm.sourceAutoReset = options.autoReset == true
+  state.alarm.sourceAutoResetAfter = nil
+  state.alarm.sourceAutoResetSeconds = tonumber(options.autoResetSeconds)
+end
+
+function raiseAlarm(reason, doorId, actor, profileName, options)
+  options = options or {}
   profileName = profileName or "security"
   if state.alarm.active then
     if profileName == "emergency" and state.alarm.profile ~= "emergency" then
@@ -4556,6 +4576,7 @@ function raiseAlarm(reason, doorId, actor, profileName)
       state.alarm.sinceMillis = nowMillis()
       state.alarm.soundStartAt = state.alarm.sinceMillis + alarmSyncLeadMillis(alarmProfile("emergency"))
       state.alarm.soundIndex = 1
+      applyAlarmSourceOptions(options)
       local profile = alarmProfile("emergency")
       pcall(prepareAlarmSoundCache, "emergency")
       broadcastAlarmState()
@@ -4573,6 +4594,12 @@ function raiseAlarm(reason, doorId, actor, profileName)
       })
       markDirty()
       return
+    end
+
+    if state.alarm.sourceKey ~= options.sourceKey then
+      clearAlarmAutoResetSource()
+    elseif options.autoReset == true then
+      applyAlarmSourceOptions(options)
     end
 
     audit("ALARM_UPDATE", {
@@ -4599,6 +4626,7 @@ function raiseAlarm(reason, doorId, actor, profileName)
   state.alarm.sinceMillis = nowMillis()
   state.alarm.soundStartAt = state.alarm.sinceMillis + alarmSyncLeadMillis(alarmProfile(profileName))
   state.alarm.soundIndex = 1
+  applyAlarmSourceOptions(options)
   clearAlarmAudioStreams(true)
   clearAlarmPreparedAudioCache()
   clearAnnouncementAudioStreams(true)
@@ -4630,6 +4658,8 @@ function resetAlarm(actor)
     profile = state.alarm.profile,
     sinceMillis = state.alarm.sinceMillis,
     soundStartAt = state.alarm.soundStartAt,
+    sourceKey = state.alarm.sourceKey,
+    sourceAutoReset = state.alarm.sourceAutoReset,
   }
   setAlarmOutputs(false)
   state.alarm.active = false
@@ -4640,6 +4670,7 @@ function resetAlarm(actor)
   state.alarm.since = nil
   state.alarm.sinceMillis = nil
   state.alarm.soundStartAt = nil
+  clearAlarmAutoResetSource()
   clearAlarmAudioStreams(true)
   clearAlarmPreparedAudioCache()
   audit("ALARM_RESET", actor or "console")
@@ -5691,6 +5722,270 @@ function readSpeedSensor(sensor)
   return compareSensorValue(value, sensor), { value = value, method = method }
 end
 
+function entityComparableNames(value)
+  local text = string.lower(tostring(value or ""))
+  text = string.gsub(text, "^%s+", "")
+  text = string.gsub(text, "%s+$", "")
+  if text == "" then
+    return {}
+  end
+
+  local out = { text }
+  local stripped = string.gsub(text, "^minecraft:", "")
+  if stripped ~= text then
+    table.insert(out, stripped)
+  end
+  local suffix = string.match(text, "([^:%./]+)$")
+  if suffix and suffix ~= text and suffix ~= stripped then
+    table.insert(out, suffix)
+  end
+  return out
+end
+
+function addEntityTarget(targets, value)
+  for _, name in ipairs(entityComparableNames(value)) do
+    targets[name] = true
+  end
+end
+
+function entityTargetSet(sensor)
+  local configured = sensor.entities or sensor.entityTypes or sensor.targets or sensor.mobs or sensor.entity or sensor.target or sensor.mob
+  if configured == nil and config and config.facility then
+    local hostile = config.facility.hostileEntityDetection or config.facility.hostileEntities
+    if type(hostile) == "table" then
+      configured = hostile.entities or hostile.entityTypes or hostile.targets or hostile.mobs
+    end
+  end
+  if configured == nil then
+    configured = { "minecraft:warden", "minecraft:wither" }
+  end
+
+  local targets = {}
+  if type(configured) == "table" then
+    for key, value in pairs(configured) do
+      if type(key) == "string" and value == true then
+        addEntityTarget(targets, key)
+      elseif type(value) == "string" or type(value) == "number" then
+        addEntityTarget(targets, value)
+      end
+    end
+  else
+    addEntityTarget(targets, configured)
+  end
+  return targets
+end
+
+function entityHasIdentity(value)
+  if type(value) ~= "table" then
+    return false
+  end
+  return value.id ~= nil
+    or value.type ~= nil
+    or value.name ~= nil
+    or value.displayName ~= nil
+    or value.entity ~= nil
+    or value.entityName ~= nil
+    or value.registryName ~= nil
+    or value.translationKey ~= nil
+    or value.mob ~= nil
+    or value.key ~= nil
+end
+
+function collectEntityValues(value, out)
+  if value == nil then
+    return
+  end
+  if type(value) ~= "table" then
+    table.insert(out, value)
+    return
+  end
+
+  if type(value.entities) == "table" then
+    collectEntityValues(value.entities, out)
+    return
+  end
+  if type(value.mobs) == "table" then
+    collectEntityValues(value.mobs, out)
+    return
+  end
+  if type(value.results) == "table" then
+    collectEntityValues(value.results, out)
+    return
+  end
+  if entityHasIdentity(value) then
+    table.insert(out, value)
+    return
+  end
+
+  for _, item in pairs(value) do
+    collectEntityValues(item, out)
+  end
+end
+
+function entityTextValues(entity)
+  local out = {}
+  local function add(value)
+    if value ~= nil and type(value) ~= "table" then
+      table.insert(out, tostring(value))
+    end
+  end
+
+  if type(entity) == "table" then
+    add(entity.id)
+    add(entity.type)
+    add(entity.name)
+    add(entity.displayName)
+    add(entity.entity)
+    add(entity.entityName)
+    add(entity.registryName)
+    add(entity.translationKey)
+    add(entity.mob)
+    add(entity.key)
+    if type(entity.entity) == "table" then
+      for _, value in ipairs(entityTextValues(entity.entity)) do
+        table.insert(out, value)
+      end
+    end
+  else
+    add(entity)
+  end
+  return out
+end
+
+function entityMatchesTargets(entity, targets)
+  for _, text in ipairs(entityTextValues(entity)) do
+    for _, name in ipairs(entityComparableNames(text)) do
+      if targets[name] then
+        return true, name
+      end
+    end
+  end
+  return false, nil
+end
+
+function entityDetectorMethodCandidates(sensor, methods)
+  local radius = sensor.radius or sensor.range or sensor.distance
+  local configuredArgs = sensor.args
+  if type(configuredArgs) ~= "table" then
+    configuredArgs = configuredArgs ~= nil and { configuredArgs } or nil
+  end
+  if sensor.method then
+    return {
+      { name = tostring(sensor.method), args = configuredArgs or (radius and { radius } or {}) },
+    }
+  end
+
+  local candidates = {
+    { name = "getEntitiesInRange", args = radius and { radius } or {} },
+    { name = "getNearbyEntities", args = radius and { radius } or {} },
+    { name = "scanEntities", args = radius and { radius } or {} },
+    { name = "getEntities", args = radius and { radius } or {} },
+    { name = "getEntities", args = {} },
+    { name = "getMobsInRange", args = radius and { radius } or {} },
+    { name = "getMobs", args = radius and { radius } or {} },
+    { name = "getMobs", args = {} },
+    { name = "getLivingEntitiesInRange", args = radius and { radius } or {} },
+    { name = "getLivingEntities", args = radius and { radius } or {} },
+    { name = "getLivingEntities", args = {} },
+    { name = "sense", args = radius and { radius } or {} },
+    { name = "sense", args = {} },
+  }
+
+  local out = {}
+  for _, candidate in ipairs(candidates) do
+    if methods[candidate.name] then
+      table.insert(out, candidate)
+    end
+  end
+  return out
+end
+
+function entityDetectorPeripheralNames(sensor)
+  local configured = sensor.peripherals or sensor.detectors or sensor.detector or sensor.peripheral
+  local out = {}
+  if type(configured) == "table" then
+    for _, name in ipairs(configured) do
+      table.insert(out, tostring(name))
+    end
+  elseif configured ~= nil and tostring(configured) ~= "" then
+    table.insert(out, tostring(configured))
+  elseif sensor.autoDiscover ~= false then
+    for _, name in ipairs(peripheralNames()) do
+      local methods = methodMap(name)
+      if #entityDetectorMethodCandidates(sensor, methods) > 0 then
+        table.insert(out, name)
+      end
+    end
+  end
+  return out
+end
+
+function entityLabel(entity)
+  local texts = entityTextValues(entity)
+  return texts[1] or "entity"
+end
+
+function readEntitySensor(sensor)
+  if not peripheral then
+    return nil, "peripheral API unavailable"
+  end
+
+  local targets = entityTargetSet(sensor)
+  local detectors = entityDetectorPeripheralNames(sensor)
+  if #detectors == 0 then
+    return nil, "no entity detector peripheral"
+  end
+
+  local detail = {
+    count = 0,
+    matches = {},
+    detectors = {},
+  }
+
+  local lastError = nil
+  for _, peripheralName in ipairs(detectors) do
+    local device = peripheral.wrap(peripheralName)
+    if device then
+      local methods = methodMap(peripheralName)
+      local candidates = entityDetectorMethodCandidates(sensor, methods)
+      for _, candidate in ipairs(candidates) do
+        local ok, result = pcall(device[candidate.name], unpackArgs(candidate.args or {}))
+        if ok then
+          local entities = {}
+          collectEntityValues(result, entities)
+          table.insert(detail.detectors, {
+            peripheral = peripheralName,
+            method = candidate.name,
+            count = #entities,
+          })
+          for _, entity in ipairs(entities) do
+            local matched, target = entityMatchesTargets(entity, targets)
+            if matched then
+              detail.count = detail.count + 1
+              table.insert(detail.matches, {
+                target = target,
+                label = entityLabel(entity),
+                peripheral = peripheralName,
+                method = candidate.name,
+              })
+            end
+          end
+          break
+        else
+          lastError = result
+        end
+      end
+    else
+      lastError = "missing peripheral " .. tostring(peripheralName)
+    end
+  end
+
+  if #detail.detectors == 0 and lastError then
+    return nil, lastError
+  end
+  return detail.count > 0, detail
+end
+
 function readFacilitySensor(sensor)
   local sensorType = sensor.type or sensor.kind
 
@@ -5700,6 +5995,10 @@ function readFacilitySensor(sensor)
 
   if sensorType == "create_speed" or sensorType == "speedometer" then
     return readSpeedSensor(sensor)
+  end
+
+  if sensorType == "entity" or sensorType == "entity_detector" or sensorType == "mob" or sensorType == "mob_detector" or sensorType == "hostile_entity" then
+    return readEntitySensor(sensor)
   end
 
   if sensorType == "peripheral" or sensorType == "generic" or sensor.method then
@@ -5734,6 +6033,9 @@ function sensorReason(sensor, detail)
   end
 
   local name = sensor.label or sensor.name or sensor.peripheral or "sensor"
+  if detail and type(detail.matches) == "table" and detail.matches[1] then
+    return tostring(name) .. " detected " .. tostring(detail.matches[1].label or detail.matches[1].target or "hostile entity")
+  end
   if detail and detail.load then
     return tostring(name) .. " load " .. tostring(math.floor(detail.load * 100)) .. "%"
   end
@@ -5761,6 +6063,37 @@ function configuredFacilitySensors()
     table.insert(out, copy)
   end
 
+  local facility = config.facility or {}
+  local hostile = facility.hostileEntityDetection or facility.hostileEntities
+  if hostile ~= false then
+    hostile = type(hostile) == "table" and hostile or {}
+    if hostile.enabled ~= false then
+      local copy = shallowCopy(hostile)
+      copy.id = copy.id or "hostile_entities"
+      copy.name = copy.name or "Hostile Entity Detector"
+      copy.type = copy.type or "entity"
+      if copy.entities == nil and #hostile > 0 then
+        copy.entities = shallowCopy(hostile)
+      end
+      copy.entities = copy.entities or copy.entityTypes or copy.targets or { "minecraft:warden", "minecraft:wither" }
+      copy.profile = copy.profile or "emergency"
+      copy.actor = copy.actor or "entity_detector"
+      copy.autoResetAlarm = copy.autoResetAlarm ~= false
+      table.insert(out, copy)
+    end
+  end
+
+  for _, sensor in ipairs(facility.entityDetectors or facility.entitySensors or {}) do
+    local copy = shallowCopy(sensor)
+    copy.type = copy.type or "entity"
+    copy.profile = copy.profile or "emergency"
+    copy.actor = copy.actor or "entity_detector"
+    if copy.autoResetAlarm == nil then
+      copy.autoResetAlarm = true
+    end
+    table.insert(out, copy)
+  end
+
   return out
 end
 
@@ -5779,7 +6112,14 @@ function facilitySensorUsesRedstoneInput(sensor)
   end
 
   local sensorType = sensor.type or sensor.kind
-  if facilitySensorUsesCreateStress(sensor) or sensorType == "create_speed" or sensorType == "speedometer" then
+  if facilitySensorUsesCreateStress(sensor)
+      or sensorType == "create_speed"
+      or sensorType == "speedometer"
+      or sensorType == "entity"
+      or sensorType == "entity_detector"
+      or sensorType == "mob"
+      or sensorType == "mob_detector"
+      or sensorType == "hostile_entity" then
     return false
   end
   if sensorType == "peripheral" or sensorType == "generic" or sensor.method then
@@ -5793,6 +6133,66 @@ function facilitySensorUsesRedstoneInput(sensor)
     or sensor.redstoneRelay ~= nil
     or sensor.integrator ~= nil
     or sensor.device ~= nil
+end
+
+function sensorAutoResetEnabled(sensor)
+  return sensor and (sensor.autoResetAlarm == true or sensor.autoReset == true)
+end
+
+function sensorAutoResetDelaySeconds(sensor)
+  local facility = config and config.facility or {}
+  local seconds = sensor and (sensor.autoResetSeconds or sensor.autoResetDelaySeconds or sensor.clearDelaySeconds)
+  seconds = tonumber(seconds or facility.entityAutoResetSeconds or facility.hostileEntityAutoResetSeconds or 5)
+  if seconds < 0 then
+    return 0
+  elseif seconds > 300 then
+    return 300
+  end
+  return seconds
+end
+
+function clearAlarmAutoResetSource()
+  state.alarm.sourceKey = nil
+  state.alarm.sourceAutoReset = false
+  state.alarm.sourceAutoResetAfter = nil
+  state.alarm.sourceAutoResetSeconds = nil
+end
+
+function alarmOptionsFromSensor(sensor, key)
+  return {
+    sourceKey = key,
+    autoReset = sensorAutoResetEnabled(sensor),
+    autoResetSeconds = sensorAutoResetDelaySeconds(sensor),
+  }
+end
+
+function cancelSensorAlarmAutoReset(key)
+  if state.alarm.active and state.alarm.sourceKey == key then
+    state.alarm.sourceAutoResetAfter = nil
+  end
+end
+
+function scheduleSensorAlarmAutoReset(sensor, key)
+  if not (state.alarm.active and state.alarm.sourceAutoReset and state.alarm.sourceKey == key) then
+    return
+  end
+  state.alarm.sourceAutoResetAfter = os.clock() + sensorAutoResetDelaySeconds(sensor)
+end
+
+function maybeAutoResetSensorAlarm()
+  if not (state.alarm.active and state.alarm.sourceAutoReset and state.alarm.sourceAutoResetAfter) then
+    return
+  end
+  if os.clock() < tonumber(state.alarm.sourceAutoResetAfter) then
+    return
+  end
+
+  local key = state.alarm.sourceKey
+  if key and state.sensors and state.sensors[key] then
+    state.alarm.sourceAutoResetAfter = nil
+    return
+  end
+  resetAlarm("auto:" .. tostring(key or "sensor"))
 end
 
 function checkConfiguredFacilitySensors(filterFn)
@@ -5815,17 +6215,19 @@ function checkConfiguredFacilitySensors(filterFn)
         end
 
         if triggered and not state.sensors[key] then
-          raiseAlarm(sensorReason(sensor, detail), nil, sensor.actor or "facility_sensor", sensorProfile(sensor))
+          raiseAlarm(sensorReason(sensor, detail), nil, sensor.actor or "facility_sensor", sensorProfile(sensor), alarmOptionsFromSensor(sensor, key))
           audit("SENSOR_FAULT", {
             sensor = sensor.name or sensor.peripheral or index,
             profile = sensorProfile(sensor),
             detail = detail,
           })
+          cancelSensorAlarmAutoReset(key)
         elseif not triggered and state.sensors[key] then
           audit("SENSOR_CLEAR", {
             sensor = sensor.name or sensor.peripheral or index,
             detail = detail,
           })
+          scheduleSensorAlarmAutoReset(sensor, key)
         end
 
         state.sensors[key] = triggered
@@ -5857,10 +6259,12 @@ function checkAutoCreateStressSensors()
       if triggered ~= nil then
         state.sensorDetails[key] = detail
         if triggered and not state.sensors[key] then
-          raiseAlarm(sensorReason(sensor, detail), nil, "create_stress", sensor.profile)
+          raiseAlarm(sensorReason(sensor, detail), nil, "create_stress", sensor.profile, alarmOptionsFromSensor(sensor, key))
           audit("SENSOR_FAULT", { sensor = name, profile = sensor.profile, detail = detail })
+          cancelSensorAlarmAutoReset(key)
         elseif not triggered and state.sensors[key] then
           audit("SENSOR_CLEAR", { sensor = name, detail = detail })
+          scheduleSensorAlarmAutoReset(sensor, key)
         end
         state.sensors[key] = triggered
       end
@@ -5871,6 +6275,7 @@ end
 function checkGlobalSensors()
   checkConfiguredFacilitySensors()
   checkAutoCreateStressSensors()
+  maybeAutoResetSensorAlarm()
 end
 
 function checkRedstoneFacilitySensors()
@@ -6699,6 +7104,8 @@ function statusSnapshot()
       profile = state.alarm.profile,
       sinceMillis = state.alarm.sinceMillis,
       soundStartAt = state.alarm.soundStartAt,
+      sourceKey = state.alarm.sourceKey,
+      sourceAutoReset = state.alarm.sourceAutoReset,
     },
     lockdown = state.lockdown,
     doors = doors,
@@ -6747,6 +7154,21 @@ function setupBool(value, defaultValue)
   end
   local text = string.lower(tostring(value))
   return text == "y" or text == "yes" or text == "true" or text == "1" or value == true
+end
+
+function setupList(value)
+  if type(value) == "table" then
+    return shallowCopy(value)
+  end
+  local out = {}
+  for item in string.gmatch(tostring(value or ""), "([^,]+)") do
+    item = string.gsub(item, "^%s+", "")
+    item = string.gsub(item, "%s+$", "")
+    if item ~= "" then
+      table.insert(out, item)
+    end
+  end
+  return out
 end
 
 function setupEndpointFromValue(value, defaultSide, controller)
@@ -7003,6 +7425,20 @@ function applySetupSensor(message, actor)
     sensor.peripheral = tostring(message.peripheral or message.name or "")
     sensor.maxLoad = tonumber(message.maxLoad) or 0.9
     sensor.profile = tostring(message.profile or "power_fault")
+  elseif sensorType == "entity" or sensorType == "entity_detector" or sensorType == "mob" or sensorType == "hostile_entity" then
+    sensor.type = "entity"
+    sensor.peripheral = tostring(message.peripheral or "")
+    if sensor.peripheral == "" then
+      sensor.peripheral = nil
+      sensor.autoDiscover = true
+    end
+    sensor.method = message.method ~= "" and message.method or nil
+    sensor.radius = tonumber(message.radius or message.range) or 64
+    sensor.entities = setupList(message.entities or message.targets or "minecraft:warden,minecraft:wither")
+    sensor.profile = tostring(message.profile or "emergency")
+    sensor.actor = "entity_detector"
+    sensor.autoResetAlarm = setupBool(message.autoResetAlarm or message.autoReset, true)
+    sensor.autoResetSeconds = tonumber(message.autoResetSeconds) or 8
   elseif sensorType == "peripheral" or sensorType == "generic" then
     sensor.type = "peripheral"
     sensor.peripheral = tostring(message.peripheral or "")
@@ -8814,7 +9250,7 @@ function setupConsoleAddDoor()
 end
 
 function setupConsoleAddSensor()
-  print("Sensor type: 1 redstone  2 Create stress  3 generic peripheral")
+  print("Sensor type: 1 redstone  2 Create stress  3 generic peripheral  4 entity detector")
   local choice = promptLine("Type", "1")
   local payload = {
     action = "add_sensor",
@@ -8833,6 +9269,15 @@ function setupConsoleAddSensor()
     payload.field = promptLine("Table field blank=whole value", "")
     payload.max = promptNumber("Alarm above blank=none", nil)
     payload.min = promptNumber("Alarm below blank=none", nil)
+  elseif choice == "4" then
+    payload.sensorType = "entity"
+    payload.peripheral = promptLine("Entity detector peripheral blank=auto", "")
+    payload.method = promptLine("Method blank=auto", "")
+    payload.entities = promptLine("Entities comma-list", "minecraft:warden,minecraft:wither")
+    payload.radius = promptNumber("Radius/range", 64)
+    payload.profile = promptLine("Alarm profile", "emergency")
+    payload.autoResetAlarm = promptBool("Auto-reset when clear", true)
+    payload.autoResetSeconds = promptNumber("Auto-reset delay seconds", 8)
   else
     payload.sensorType = "redstone"
     payload.controller = promptLine("Controller id blank/server=server", "server")
@@ -10359,7 +10804,7 @@ function kioskSetupAddDoor(serverId, token)
 end
 
 function kioskSetupAddSensor(serverId, token)
-  print("Sensor type: 1 redstone  2 Create stress  3 generic peripheral")
+  print("Sensor type: 1 redstone  2 Create stress  3 generic peripheral  4 entity detector")
   local choice = kioskPromptLine("Type", "1")
   local payload = {
     action = "add_sensor",
@@ -10378,6 +10823,15 @@ function kioskSetupAddSensor(serverId, token)
     payload.field = kioskPromptLine("Table field blank=whole value", "")
     payload.max = kioskPromptNumber("Alarm above blank=none", nil)
     payload.min = kioskPromptNumber("Alarm below blank=none", nil)
+  elseif choice == "4" then
+    payload.sensorType = "entity"
+    payload.peripheral = kioskPromptLine("Entity detector blank=auto", "")
+    payload.method = kioskPromptLine("Method blank=auto", "")
+    payload.entities = kioskPromptLine("Entities comma-list", "minecraft:warden,minecraft:wither")
+    payload.radius = kioskPromptNumber("Radius/range", 64)
+    payload.profile = kioskPromptLine("Alarm profile", "emergency")
+    payload.autoResetAlarm = kioskPromptBool("Auto-reset when clear", true)
+    payload.autoResetSeconds = kioskPromptNumber("Auto-reset delay seconds", 8)
   else
     payload.sensorType = "redstone"
     payload.controller = kioskPromptLine("Controller id blank/server=server", kioskDefaultController())

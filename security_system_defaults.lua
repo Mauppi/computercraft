@@ -691,6 +691,17 @@ return {
     autoDiscoverCreateStress = false,
     autoStressMaxLoad = 0.9,
     autoStressProfile = "power_fault",
+    hostileEntityDetection = {
+      enabled = true,
+      name = "Hostile Entity Detector",
+      type = "entity",
+      entities = { "minecraft:warden", "minecraft:wither" },
+      radius = 64,
+      profile = "emergency",
+      autoDiscover = true,
+      autoResetAlarm = true,
+      autoResetSeconds = 8,
+    },
   },
 
   setup = {
