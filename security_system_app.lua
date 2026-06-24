@@ -3233,6 +3233,12 @@ function queueRemoteAudioWork()
   end
 end
 
+function queueAudioStreamWork()
+  if os and os.queueEvent then
+    os.queueEvent("security_audio_work")
+  end
+end
+
 function appendRemoteAudioReadyChunks(stream, maxChunks)
   if type(stream) ~= "table" or type(stream.chunks) ~= "table" then
     return false
@@ -3809,11 +3815,13 @@ function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume, optio
   local existing = state.alarm.audioStreams[speakerName]
   if existing and options.replaceExisting == false then
     state.alarm.pendingAudioStreams[speakerName] = stream
+    queueAudioStreamWork()
     alarmFeedSpeakerStream(speakerName)
     return true
   end
 
   state.alarm.audioStreams[speakerName] = stream
+  queueAudioStreamWork()
 
   local queued = alarmFeedSpeakerStream(speakerName)
   return queued or state.alarm.audioStreams[speakerName] ~= nil
@@ -4487,18 +4495,19 @@ function playAlarmPulse()
         startAtMillis = streamStartAt,
         replaceExisting = not preloadMode,
         queueAfterCurrent = preloadMode,
+        syncSkipLate = usePreparedAudio and false or nil,
       })
       played = speakerPlayed or played
     end
-    if not speakerPlayed and not usePreparedAudio then
+    if not speakerPlayed then
       speakerPlayed = playDspAlarm(profile, speaker)
       played = speakerPlayed or played
     end
-    if not speakerPlayed and not usePreparedAudio then
+    if not speakerPlayed then
       speakerPlayed = playMinecraftAlarmSound(speaker, sound)
       played = speakerPlayed or played
     end
-    if (not speakerPlayed) and (not usePreparedAudio) and speaker.playNote then
+    if (not speakerPlayed) and speaker.playNote then
       pcall(speaker.playNote, "pling", alarmSoundValue(sound, "volume", 2), alarmSoundValue(sound, "pitch", 1))
     end
   end
@@ -10100,6 +10109,14 @@ function alarmAudioStreamLoop()
   local audioConfig = announcementAudioConfig()
   local watchdogSeconds = audioWatchdogDelaySeconds(audioConfig)
   local watchdogTimer = os.startTimer(watchdogSeconds)
+  local function resetAudioWatchdog()
+    if watchdogTimer and os.cancelTimer then
+      pcall(os.cancelTimer, watchdogTimer)
+    end
+    audioConfig = announcementAudioConfig()
+    watchdogSeconds = audioWatchdogDelaySeconds(audioConfig)
+    watchdogTimer = os.startTimer(watchdogSeconds)
+  end
   while state.running or state.kiosk.running do
     local event = { os.pullEventRaw() }
     if event[1] == "speaker_audio_empty" then
@@ -10108,19 +10125,19 @@ function alarmAudioStreamLoop()
         handleAnnouncementSpeakerAudioEmpty(event[2])
       end
       processAnnouncementQueue()
+      resetAudioWatchdog()
     elseif event[1] == "security_audio_work" then
       processRemoteAudioStreams()
       feedAlarmAudioStreams()
       feedAnnouncementAudioStreams()
       processAnnouncementQueue()
+      resetAudioWatchdog()
     elseif event[1] == "timer" and event[2] == watchdogTimer then
       processRemoteAudioStreams()
       feedAlarmAudioStreams()
       feedAnnouncementAudioStreams()
       processAnnouncementQueue()
-      audioConfig = announcementAudioConfig()
-      watchdogSeconds = audioWatchdogDelaySeconds(audioConfig)
-      watchdogTimer = os.startTimer(watchdogSeconds)
+      resetAudioWatchdog()
     end
   end
 end
