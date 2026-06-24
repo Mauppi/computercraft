@@ -1593,6 +1593,14 @@ function notificationUsesAnnouncementAudio(notification)
   return notification.announcement == true or kind == "announcement" or kind == "alarm" or kind == "emergency" or kind == "lockdown" or kind == "lockdown_clear"
 end
 
+function notificationIsActiveAlarmEvent(notification)
+  if type(notification) ~= "table" then
+    return false
+  end
+  local kind = tostring(notification.kind or notification.type or "")
+  return kind == "alarm" or kind == "emergency"
+end
+
 function announcementSyncLeadMillis()
   local announcements = config and config.announcements or {}
   local audio = type(announcements.audio) == "table" and announcements.audio or {}
@@ -1722,7 +1730,9 @@ function broadcastKioskNotification(notification, targetUser)
   local playOnServer = false
   if not targetUser and useAnnouncementAudio then
     local announcements = config.announcements or {}
-    playOnServer = announcements.serverPlayback ~= false and announcements.localPlayback ~= false
+    playOnServer = announcements.serverPlayback ~= false
+      and announcements.localPlayback ~= false
+      and not notificationIsActiveAlarmEvent(notification)
   end
   local playedBeforeNotify = false
   if playOnServer and useAnnouncementAudio and not targetUser then
@@ -2894,6 +2904,10 @@ function alarmDelayUntilMillis(targetMillis)
 end
 
 function alarmWaitingForStart()
+  local mode = string.lower(tostring(config and config.mode or "server"))
+  if mode ~= "kiosk" and mode ~= "controller" and mode ~= "door" and mode ~= "door_controller" then
+    return false
+  end
   return state.alarm.active and tonumber(state.alarm.soundStartAt) and nowMillis() < tonumber(state.alarm.soundStartAt)
 end
 
@@ -4465,7 +4479,7 @@ function playAlarmPulse()
 
   local profile = alarmProfile(state.alarm.profile)
   if announcementAudioBusy() then
-    return false
+    clearAnnouncementAudioStreams(true)
   end
 
   local preloadMode = alarmAudioBusy()
@@ -4604,8 +4618,9 @@ function raiseAlarm(reason, doorId, actor, profileName, options)
       local profile = alarmProfile("emergency")
       pcall(prepareAlarmSoundCache, "emergency")
       broadcastAlarmState()
-      scheduleAlarmPulse()
       setAlarmOutputs(true)
+      pcall(playAlarmPulse)
+      scheduleAlarmPulse()
       sendChat((profile.label or "EMERGENCY") .. ": " .. state.alarm.reason, "emergency")
       broadcastEventNotification("emergency", profile.label or "Emergency Alarm", state.alarm.reason, "critical", {
         alarm = shallowCopy(state.alarm),
@@ -4658,8 +4673,9 @@ function raiseAlarm(reason, doorId, actor, profileName, options)
   local profile = alarmProfile(profileName)
   pcall(prepareAlarmSoundCache, profileName)
   broadcastAlarmState()
-  scheduleAlarmPulse()
   setAlarmOutputs(true)
+  pcall(playAlarmPulse)
+  scheduleAlarmPulse()
   sendChat((profile.label or "ALARM") .. ": " .. state.alarm.reason, profileName)
   broadcastEventNotification(profileName == "emergency" and "emergency" or "alarm", profile.label or "Alarm", state.alarm.reason, profileName == "emergency" and "critical" or "warning", {
     alarm = shallowCopy(state.alarm),
