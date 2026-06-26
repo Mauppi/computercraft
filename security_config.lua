@@ -181,7 +181,7 @@ return {
   announcements = {
     enabled = true,
     sound = true,
-    voice = false,
+    voice = true,
     syntheticVoice = false,
     requireVoiceLine = true,
     volume = 1,
@@ -215,7 +215,7 @@ return {
     maxCharacters = 96,
     auto = {
       enabled = true,
-      intervalSeconds = 120,
+      intervalSeconds = 200,
     },
     lines = {
       { voiceLine = "memeorpo" },
@@ -228,6 +228,7 @@ return {
       { voiceLine = "slopday_animals" },
       { voiceLine = "slopday_sloppingit" },
       { voiceLine = "slopdaysus" },
+      { voiceLine = "cockdrops" }
     },
     eventAnnouncements = true,
     personnelTitles = {
@@ -530,6 +531,7 @@ return {
       slopday_animals = { files = { "announcements/slopdayanimals.wav" } },
       slopday_sloppingit = { files = { "announcements/slopdaysloppingit.wav" } },
       slopdaysus = { files = { "announcements/slopdaySuS.wav" } },
+      cockdrops = { files = { "announcements/cockdrops.wav" } },
     },
     jingles = {
       announcement = {
