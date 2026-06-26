@@ -82,12 +82,54 @@ return {
       },
     },
     {
+      path = "aukit.lua",
+      required = true,
+      minSize = 100000,
+      contains = {
+        "AUKit",
+        "function aukit.play",
+        "function aukit.wav",
+        "function aukit.stream.wav",
+      },
+    },
+    {
+      path = "auplay.lua",
+      required = false,
+      minSize = 500,
+      contains = {
+        "local aukit = require \"aukit\"",
+        "aukit.play",
+      },
+    },
+    {
+      path = "austream.lua",
+      required = false,
+      minSize = 1000,
+      contains = {
+        "local aukit = require \"aukit\"",
+        "aukit.stream.wav",
+        "rednet://",
+      },
+    },
+    {
+      path = "security_system_audio.lua",
+      required = true,
+      minSize = 1000,
+      contains = {
+        "AUKit-backed audio helpers",
+        "function M.loadWav",
+        "function M.playPcmRange",
+        "function M.packPcmSamples",
+      },
+    },
+    {
       path = "security_system_notifications.lua",
       required = true,
       minSize = 1000,
       contains = {
         "Kiosk notification",
         "security_system_announcements",
+        "security_system_audio",
         "function M.push",
         "function M.playSound",
         "function M.wavKindAllowed",
@@ -99,6 +141,7 @@ return {
       minSize = 1000,
       contains = {
         "Facility announcement audio",
+        "security_system_audio",
         "SECURITY_SYSTEM_ASSET_ROOT",
         "function M.loadWav",
         "function M.buildVoiceBuffer",
@@ -124,6 +167,7 @@ return {
         "security_system_rednet",
         "security_system_notifications",
         "security_system_announcements",
+        "security_system_audio",
         "DEFAULT_CONFIG_URL",
         "installRemoteConfigIfMissing",
         "installKioskConfigIfMissing",
@@ -185,6 +229,8 @@ return {
       minSize = 300,
       contains = {
         "security_system_app",
+        "security_system_audio",
+        "AUKIT_MODULE",
         "SECURITY_SYSTEM_ASSET_ROOT",
         "app.run",
       },

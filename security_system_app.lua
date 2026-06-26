@@ -18,6 +18,7 @@ local args = {}
 local secureRednet = require("security_system_rednet")
 local kioskNotifications = require("security_system_notifications")
 local facilityAnnouncements = require("security_system_announcements")
+local securityAudio = require("security_system_audio")
 
 local sides = { "top", "bottom", "left", "right", "front", "back" }
 local unpackArgs = table.unpack or unpack
@@ -2985,20 +2986,7 @@ function streamRefillSeconds(stream)
 end
 
 function pcmChunk(pcm, firstIndex, lastIndex, clampSamples)
-  local chunk = {}
-  local outIndex = 1
-  if clampSamples then
-    for index = firstIndex, lastIndex do
-      chunk[outIndex] = clampSample(pcm[index])
-      outIndex = outIndex + 1
-    end
-  else
-    for index = firstIndex, lastIndex do
-      chunk[outIndex] = pcm[index]
-      outIndex = outIndex + 1
-    end
-  end
-  return chunk
+  return securityAudio.pcmChunk(pcm, firstIndex, lastIndex, clampSamples)
 end
 
 function preparedAudioConfig()
@@ -3097,42 +3085,11 @@ function cooperativeAudioYield()
 end
 
 function packPcmSamples(pcm, firstIndex, lastIndex)
-  local out = {}
-  local block = {}
-  local blockIndex = 1
-  for index = firstIndex, lastIndex do
-    block[blockIndex] = (clampSample(pcm[index]) + 128) % 256
-    if blockIndex >= 256 then
-      out[#out + 1] = string.char(unpackArgs(block, 1, blockIndex))
-      blockIndex = 1
-    else
-      blockIndex = blockIndex + 1
-    end
-  end
-  if blockIndex > 1 then
-    out[#out + 1] = string.char(unpackArgs(block, 1, blockIndex - 1))
-  end
-  return table.concat(out)
+  return securityAudio.packPcmSamples(pcm, firstIndex, lastIndex)
 end
 
 function appendPackedPcmSamples(buffer, packed, allowYield)
-  if type(packed) ~= "string" then
-    return
-  end
-  local offset = #buffer
-  local blocks = 0
-  for index = 1, #packed, 256 do
-    local last = math.min(#packed, index + 255)
-    local bytes = { string.byte(packed, index, last) }
-    for byteIndex = 1, #bytes do
-      buffer[offset + byteIndex] = (bytes[byteIndex] or 128) - 128
-    end
-    offset = offset + #bytes
-    blocks = blocks + 1
-    if allowYield and blocks % 16 == 0 then
-      cooperativeAudioYield()
-    end
-  end
+  securityAudio.appendPackedPcmSamples(buffer, packed, allowYield)
 end
 
 function alarmHasPendingAudioStream()
@@ -3160,16 +3117,7 @@ function promotePendingAlarmStream(speakerName, previousQueuedUntil)
 end
 
 function appendPcmSampleTable(buffer, samples, allowYield)
-  if type(samples) ~= "table" then
-    return
-  end
-  local offset = #buffer
-  for index = 1, #samples do
-    buffer[offset + index] = clampSample(samples[index])
-    if allowYield and index % 4096 == 0 then
-      cooperativeAudioYield()
-    end
-  end
+  securityAudio.appendPcmSampleTable(buffer, samples, allowYield)
 end
 
 function preparedAudioSenderAllowed(sender)
@@ -3283,9 +3231,9 @@ function appendRemoteAudioReadyChunks(stream, maxChunks)
       break
     end
     if type(chunk) == "string" then
-      appendPackedPcmSamples(stream.pcm, chunk)
+      appendPackedPcmSamples(stream.pcm, chunk, true)
     elseif type(chunk) == "table" then
-      appendPcmSampleTable(stream.pcm, chunk)
+      appendPcmSampleTable(stream.pcm, chunk, true)
     else
       break
     end
@@ -3369,7 +3317,7 @@ function startPreparedAlarmAudioPlayback(stream)
     return false
   end
 
-  appendRemoteAudioReadyChunks(stream, 6)
+  appendRemoteAudioReadyChunks(stream, 3)
   if not (type(stream.pcm) == "table" and #stream.pcm > 0) then
     return false
   end
@@ -3548,7 +3496,7 @@ function processRemoteAudioStreams()
   local moreWork = false
   for _, stream in pairs(state.remoteAudio.streams or {}) do
     if remoteAudioKind(stream) == "alarm" then
-      appendRemoteAudioReadyChunks(stream, 6)
+      appendRemoteAudioReadyChunks(stream, 3)
       startPreparedAlarmAudioPlayback(stream)
       updateRemoteAlarmSpeakerStreams(stream)
       if not stream.appendComplete then
@@ -3646,7 +3594,7 @@ function alarmFeedSpeakerStream(speakerName)
     state.alarm.audioStreams[speakerName] = nil
     return false
   end
-  if not (stream.speaker and stream.speaker.playAudio) then
+  if not securityAudio.canPlayAudio(stream.speaker) then
     state.alarm.audioStreams[speakerName] = nil
     return false
   end
@@ -3714,10 +3662,10 @@ function alarmFeedSpeakerStream(speakerName)
     end
 
     local last = math.min(availableSamples, stream.nextIndex + stream.chunkSamples - 1)
-    local chunk = pcmChunk(stream.pcm, stream.nextIndex, last, stream.clampSamples)
-
     stream.lastAttemptAt = os.clock()
-    local ok, accepted = pcall(stream.speaker.playAudio, chunk, stream.volume)
+    local ok, accepted, queuedSamples = securityAudio.playPcmRange(stream.speaker, stream.pcm, stream.nextIndex, last, stream.volume, {
+      clampSamples = stream.clampSamples,
+    })
     if not ok then
       state.alarm.audioStreams[speakerName] = nil
       return false
@@ -3733,11 +3681,10 @@ function alarmFeedSpeakerStream(speakerName)
     end
 
     local now = os.clock()
-    local queuedSamples = last - stream.nextIndex + 1
     local sampleRate = math.max(1, tonumber(stream.sampleRate) or 48000)
     local base = math.max(tonumber(stream.queuedUntil) or now, now)
-    stream.queuedUntil = base + (queuedSamples / sampleRate)
-    stream.acceptedSamples = (tonumber(stream.acceptedSamples) or 0) + queuedSamples
+    stream.queuedUntil = base + ((queuedSamples or 0) / sampleRate)
+    stream.acceptedSamples = (tonumber(stream.acceptedSamples) or 0) + (queuedSamples or 0)
     stream.startedPlaybackAt = stream.startedPlaybackAt or now
     stream.nextIndex = last + 1
     stream.lastQueuedAt = now
@@ -3783,7 +3730,7 @@ end
 
 function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume, options)
   options = options or {}
-  if not (speaker and speaker.playAudio and type(pcm) == "table" and #pcm > 0) then
+  if not (securityAudio.canPlayAudio(speaker) and type(pcm) == "table" and #pcm > 0) then
     return false
   end
 
@@ -3799,10 +3746,9 @@ function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume, optio
 
   if speakerName == "" then
     local last = math.min(#pcm, chunkSamples)
-    local chunk = pcmChunk(pcm, 1, last, false)
-    local ok, accepted = pcall(speaker.playAudio, chunk, volume)
+    local ok, accepted, queuedSamples = securityAudio.playPcmRange(speaker, pcm, 1, last, volume)
     if ok and accepted ~= false then
-      state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, os.clock() + (last / sampleRate))
+      state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, os.clock() + ((queuedSamples or last) / sampleRate))
     end
     return ok and accepted ~= false
   end
@@ -4050,7 +3996,7 @@ function announcementFeedSpeakerStream(speakerName)
     state.announcements.audioStreams[speakerName] = nil
     return false
   end
-  if not (stream.speaker and stream.speaker.playAudio) then
+  if not securityAudio.canPlayAudio(stream.speaker) then
     state.announcements.audioStreams[speakerName] = nil
     return false
   end
@@ -4095,10 +4041,10 @@ function announcementFeedSpeakerStream(speakerName)
     end
 
     local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
-    local chunk = pcmChunk(stream.pcm, stream.nextIndex, last, stream.clampSamples)
-
     stream.lastAttemptAt = os.clock()
-    local ok, accepted = pcall(stream.speaker.playAudio, chunk, stream.volume)
+    local ok, accepted, queuedSamples = securityAudio.playPcmRange(stream.speaker, stream.pcm, stream.nextIndex, last, stream.volume, {
+      clampSamples = stream.clampSamples,
+    })
     if not ok then
       state.announcements.audioStreams[speakerName] = nil
       return false
@@ -4114,11 +4060,10 @@ function announcementFeedSpeakerStream(speakerName)
     end
 
     local now = os.clock()
-    local queuedSamples = last - stream.nextIndex + 1
     local sampleRate = math.max(1, tonumber(stream.sampleRate) or 48000)
     local base = math.max(tonumber(stream.queuedUntil) or now, now)
-    stream.queuedUntil = base + (queuedSamples / sampleRate)
-    stream.acceptedSamples = (tonumber(stream.acceptedSamples) or 0) + queuedSamples
+    stream.queuedUntil = base + ((queuedSamples or 0) / sampleRate)
+    stream.acceptedSamples = (tonumber(stream.acceptedSamples) or 0) + (queuedSamples or 0)
     stream.started = true
     stream.nextIndex = last + 1
     stream.lastQueuedAt = now
@@ -4220,7 +4165,7 @@ function startAnnouncementAudioStream(speakerName, speaker, pcm, volume, options
   if ((state.alarm.active or alarmAudioBusy()) and not options.allowDuringAlarm) or ((not options.allowExisting) and announcementAudioBusy()) then
     return false
   end
-  if not (speaker and speaker.playAudio and type(pcm) == "table" and #pcm > 0) then
+  if not (securityAudio.canPlayAudio(speaker) and type(pcm) == "table" and #pcm > 0) then
     return false
   end
 
@@ -4425,7 +4370,7 @@ function playFacilityAnnouncement(announcement, options)
 end
 
 function playDspAlarm(profile, speaker)
-  if not (speaker and speaker.playAudio) then
+  if not securityAudio.canPlayAudio(speaker) then
     return false
   end
 
@@ -4435,7 +4380,7 @@ function playDspAlarm(profile, speaker)
   end
 
   local dsp = profile.dsp or {}
-  local ok, accepted = pcall(speaker.playAudio, buffer, tonumber(dsp.volume) or 1)
+  local ok, accepted = securityAudio.playPcmRange(speaker, buffer, 1, #buffer, tonumber(dsp.volume) or 1)
   return ok and accepted ~= false
 end
 

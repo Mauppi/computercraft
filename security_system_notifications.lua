@@ -2,6 +2,11 @@
 
 local M = {}
 
+local okSecurityAudio, securityAudio = pcall(require, "security_system_audio")
+if not okSecurityAudio then
+  securityAudio = nil
+end
+
 local okAnnouncementAudio, announcementAudio = pcall(require, "security_system_announcements")
 if not okAnnouncementAudio then
   announcementAudio = nil
@@ -196,98 +201,15 @@ local function notificationPcm(sound, audioConfig)
 end
 
 local function playPcm(speaker, pcm, volume, audioConfig)
-  if not (speaker and speaker.playAudio and type(pcm) == "table" and #pcm > 0) then
+  if not (securityAudio and securityAudio.canPlayAudio and securityAudio.canPlayAudio(speaker) and type(pcm) == "table" and #pcm > 0) then
     return false
   end
 
-  local maxSamples = tonumber(audioConfig and audioConfig.maxSamples) or 128000
-  if maxSamples <= 0 or #pcm <= maxSamples then
-    local ok, accepted = pcall(speaker.playAudio, pcm, volume)
-    return ok and accepted ~= false
-  end
-
-  local chunkSamples = tonumber(audioConfig and (audioConfig.chunkSamples or audioConfig.playbackSamples)) or maxSamples
-  if chunkSamples <= 0 then
-    chunkSamples = maxSamples
-  end
-  chunkSamples = math.floor(chunkSamples)
-  if chunkSamples < 1024 then
-    chunkSamples = 1024
-  elseif chunkSamples > 128000 then
-    chunkSamples = 128000
-  end
-
-  local sampleRate = tonumber(audioConfig and audioConfig.sampleRate) or 48000
-  if sampleRate <= 0 then
-    sampleRate = 48000
-  end
-  local tailSeconds = tonumber(audioConfig and audioConfig.tailSeconds) or 0.25
-  local graceSeconds = tonumber(audioConfig and audioConfig.streamGraceSeconds) or 10
-  local deadline = os.clock() + (#pcm / sampleRate) + graceSeconds
-  local nextIndex = 1
-  local queuedUntil = nil
-  local started = false
-
-  local function waitForSpeaker(seconds)
-    seconds = tonumber(seconds) or 0.25
-    if os and os.startTimer and (os.pullEventRaw or os.pullEvent) then
-      local pull = os.pullEventRaw or os.pullEvent
-      local timer = os.startTimer(seconds)
-      while true do
-        local event = { pull() }
-        if event[1] == "speaker_audio_empty" or (event[1] == "timer" and event[2] == timer) then
-          return
-        end
-      end
-    elseif sleep then
-      sleep(seconds)
-    end
-  end
-
-  while nextIndex <= #pcm and os.clock() <= deadline do
-    local last = math.min(#pcm, nextIndex + chunkSamples - 1)
-    local chunk = {}
-    local outIndex = 1
-    for index = nextIndex, last do
-      chunk[outIndex] = pcm[index]
-      outIndex = outIndex + 1
-    end
-
-    local ok, accepted = pcall(speaker.playAudio, chunk, volume)
-    if not ok then
-      return started
-    end
-    if accepted == false then
-      local waitSeconds = 0.25
-      if queuedUntil then
-        waitSeconds = (queuedUntil - os.clock()) - 0.25
-        if waitSeconds < 0.05 then
-          waitSeconds = 0.05
-        elseif waitSeconds > 1 then
-          waitSeconds = 1
-        end
-      end
-      waitForSpeaker(waitSeconds)
-    else
-      local now = os.clock()
-      local queuedSamples = last - nextIndex + 1
-      queuedUntil = math.max(queuedUntil or now, now) + (queuedSamples / sampleRate)
-      nextIndex = last + 1
-      started = true
-    end
-  end
-
-  if started and queuedUntil then
-    while os.clock() < queuedUntil + tailSeconds and os.clock() <= deadline do
-      waitForSpeaker(math.min(1, math.max(0.05, queuedUntil + tailSeconds - os.clock())))
-    end
-  end
-
-  return started
+  return securityAudio.playPcm(speaker, pcm, volume, audioConfig)
 end
 
 local function playNotificationWav(speaker, sounds, notifications)
-  if not (speaker and speaker.playAudio) then
+  if not (securityAudio and securityAudio.canPlayAudio and securityAudio.canPlayAudio(speaker)) then
     return false
   end
 

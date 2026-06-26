@@ -11,6 +11,8 @@ local DEFAULTS_MODULE_FILE = "security_system_defaults.lua"
 local REDNET_MODULE_FILE = "security_system_rednet.lua"
 local NOTIFICATIONS_MODULE_FILE = "security_system_notifications.lua"
 local ANNOUNCEMENTS_MODULE_FILE = "security_system_announcements.lua"
+local AUDIO_MODULE_FILE = "security_system_audio.lua"
+local AUKIT_FILE = "aukit.lua"
 local CONFIG_FILE = "security_config.lua"
 local KIOSK_CONFIG_EXAMPLE = "security_kiosk_config.example.lua"
 local LOCAL_DATA_FILE = "security_local_data.lua"
@@ -60,28 +62,52 @@ local FALLBACK_MANIFEST = {
       contains = { "Rednet message wrapping", "__securitySystem", "function M.wrap" },
     },
     {
+      path = AUKIT_FILE,
+      required = true,
+      minSize = 100000,
+      contains = { "AUKit", "function aukit.play", "function aukit.wav", "function aukit.stream.wav" },
+    },
+    {
+      path = "auplay.lua",
+      required = false,
+      minSize = 500,
+      contains = { "local aukit = require \"aukit\"", "aukit.play" },
+    },
+    {
+      path = "austream.lua",
+      required = false,
+      minSize = 1000,
+      contains = { "local aukit = require \"aukit\"", "aukit.stream.wav", "rednet://" },
+    },
+    {
+      path = AUDIO_MODULE_FILE,
+      required = true,
+      minSize = 1000,
+      contains = { "AUKit-backed audio helpers", "function M.loadWav", "function M.playPcmRange", "function M.packPcmSamples" },
+    },
+    {
       path = NOTIFICATIONS_MODULE_FILE,
       required = true,
       minSize = 1000,
-      contains = { "Kiosk notification", "security_system_announcements", "function M.push", "function M.playSound", "function M.wavKindAllowed" },
+      contains = { "Kiosk notification", "security_system_announcements", "security_system_audio", "function M.push", "function M.playSound", "function M.wavKindAllowed" },
     },
     {
       path = ANNOUNCEMENTS_MODULE_FILE,
       required = true,
       minSize = 1000,
-      contains = { "Facility announcement audio", "SECURITY_SYSTEM_ASSET_ROOT", "function M.loadWav", "function M.buildAnnouncementBuffer", "playPcmOnSpeakers", "mixSamplesAt", "scaledSamples", "hasSamples", "variations", "voiceLines", "syntheticVoice", "speaker_audio_empty", "function M.play" },
+      contains = { "Facility announcement audio", "security_system_audio", "SECURITY_SYSTEM_ASSET_ROOT", "function M.loadWav", "function M.buildAnnouncementBuffer", "playPcmOnSpeakers", "mixSamplesAt", "scaledSamples", "hasSamples", "variations", "voiceLines", "syntheticVoice", "speaker_audio_empty", "function M.play" },
     },
     {
       path = APP_MODULE_FILE,
       required = true,
       minSize = 2000,
-      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "DEFAULT_CONFIG_URL", "installRemoteConfigIfMissing", "installKioskConfigIfMissing", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "wrapEndpointPeripheral", "pulseSeconds", "setAnalogueOutput", "readerKindFor", "printReaderSourceHints", "kioskSetupReaderHints", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "alarmAudioStreamLoop", "speaker_audio_empty", "alarmSyncLeadMillis", "soundStartAt", "serverTimeMillis", "serverMillisToLocalMillis", "ensureNotificationPlaybackSchedule", "alignAnnouncementPcmToSchedule", "alignAlarmPcmToSchedule", "doorAnnouncementFields", "configuredEventAnnouncement", "personnel_request", "personnelRequestFields", "personnelReasonFields", "personnelTitleLabel", "kioskLocationArea", "kioskPaRequest", "configuredAnnouncement", "configuredAnnouncementHasAudio", "voiceLines", "alarmAnnouncementSuppressionActive", "announcementCanPlayDuringAlarm", "prebufferSeconds", "idleWatchdogSeconds", "audioWatchdogDelaySeconds", "preparedAudioYieldChunks", "invalidateMonitorCache", "broadcastActionAnnouncement", "notificationUsesAnnouncementAudio", "announcementIsAlarmLike", "playFacilityAnnouncement", "pruneAnnouncementAudioStreams", "feedAnnouncementAudioStreams", "handleAnnouncementSpeakerAudioEmpty", "includeAlarm", "function main()", "return {" },
+      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "security_system_audio", "DEFAULT_CONFIG_URL", "installRemoteConfigIfMissing", "installKioskConfigIfMissing", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "wrapEndpointPeripheral", "pulseSeconds", "setAnalogueOutput", "readerKindFor", "printReaderSourceHints", "kioskSetupReaderHints", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "alarmAudioStreamLoop", "speaker_audio_empty", "alarmSyncLeadMillis", "soundStartAt", "serverTimeMillis", "serverMillisToLocalMillis", "ensureNotificationPlaybackSchedule", "alignAnnouncementPcmToSchedule", "alignAlarmPcmToSchedule", "doorAnnouncementFields", "configuredEventAnnouncement", "personnel_request", "personnelRequestFields", "personnelReasonFields", "personnelTitleLabel", "kioskLocationArea", "kioskPaRequest", "configuredAnnouncement", "configuredAnnouncementHasAudio", "voiceLines", "alarmAnnouncementSuppressionActive", "announcementCanPlayDuringAlarm", "prebufferSeconds", "idleWatchdogSeconds", "audioWatchdogDelaySeconds", "preparedAudioYieldChunks", "invalidateMonitorCache", "broadcastActionAnnouncement", "notificationUsesAnnouncementAudio", "announcementIsAlarmLike", "playFacilityAnnouncement", "pruneAnnouncementAudioStreams", "feedAnnouncementAudioStreams", "handleAnnouncementSpeakerAudioEmpty", "includeAlarm", "function main()", "return {" },
     },
     {
       path = PROGRAM,
       required = true,
       minSize = 300,
-      contains = { "security_system_app", "SECURITY_SYSTEM_ASSET_ROOT", "app.run" },
+      contains = { "security_system_app", "security_system_audio", "AUKIT_MODULE", "SECURITY_SYSTEM_ASSET_ROOT", "app.run" },
     },
     {
       path = MANIFEST_FILE,

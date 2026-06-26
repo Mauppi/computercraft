@@ -166,7 +166,7 @@ When encryption is enabled, plaintext Rednet packets are rejected unless `allowP
 
 Kiosks receive real-time notifications for facility feed posts, direct messages, alarms, alarm resets, and lockdown changes. Recent notifications appear in the kiosk header and in the kiosk menu's Notifications view. Attached kiosk speakers play notification sounds configured under `notifications.sounds`.
 
-DMs and facility feed posts can use short WAV clips through `speaker.playAudio`. By default, only notification kinds `dm` and `social` may play notification WAVs; alarm, emergency, lockdown, announcement, and alarm reset events are blocked from this path so they keep using the alarm/announcement audio systems or Minecraft sound fallback.
+DMs and facility feed posts can use short WAV clips through the AUKit-backed PCM playback path. By default, only notification kinds `dm` and `social` may play notification WAVs; alarm, emergency, lockdown, announcement, and alarm reset events are blocked from this path so they keep using the alarm/announcement audio systems or Minecraft sound fallback.
 
 ```lua
 notifications = {
@@ -210,7 +210,7 @@ Admins can send a facility announcement from the server console:
 announce <message>
 ```
 
-Announcements are pushed to kiosks as real-time notifications. Kiosks with speakers stream a stitched `speaker.playAudio` buffer when available: jingle, optional WAV/PCM voice line segments, then generated PCM voice if no file-backed voice line is configured. Long jingles and voice lines are split into `announcements.chunkSamples` packets and continue on `speaker_audio_empty` instead of cutting off after the first packet. Configure this under `announcements`; scheduled announcements can be enabled with `announcements.auto.enabled = true`.
+Announcements are pushed to kiosks as real-time notifications. Kiosks with speakers stream a stitched AUKit-decoded PCM buffer when available: jingle, optional WAV/PCM voice line segments, then generated PCM voice if no file-backed voice line is configured. Long jingles and voice lines are split into `announcements.chunkSamples` packets and continue on `speaker_audio_empty` instead of cutting off after the first packet. Configure this under `announcements`; scheduled announcements can be enabled with `announcements.auto.enabled = true`.
 
 Normal announcements are queued while another announcement is still playing or alarm audio is active, then drained by the audio watchdog when the speakers are free. Use `announcements.queueLimit` to cap queued items. Alarm and emergency announcements can still interrupt existing announcement audio when `announcements.alarmAnnouncements` is enabled.
 
@@ -303,9 +303,9 @@ Committed audio can also be listed explicitly in `security_system_manifest.lua` 
 
 ## Alarm Audio And Emergency Buttons
 
-Speakers use generated PCM/DSP alarm pulses through `speaker.playAudio` when available, with Minecraft sound fallback. The default DSP profiles use low dissonant tones, sub harmonics, detune, pulsing, sample crush, tremolo, and grit for a more menacing alarm sound. Configure or disable this under `alarm.dsp`.
+Speakers use AUKit-backed PCM/DSP alarm pulses when available, with Minecraft sound fallback. The default DSP profiles use low dissonant tones, sub harmonics, detune, pulsing, sample crush, tremolo, and grit for a more menacing alarm sound. Configure or disable this under `alarm.dsp`.
 
-Alarm loop entries under `alarm.sounds` can also be WAV files, stitched WAV segments, or raw PCM sample tables. When a selected loop entry has `wav`, `files`, or `pcm`, it streams through `speaker.playAudio` in chunks and waits for the full clip to finish before looping or rotating to the next alarm sound. With server-prepared audio enabled, the server broadcasts the prepared alarm buffer to remote computers instead of making each kiosk load the same WAV files. The server broadcasts `alarm.soundStartAt` before audio starts so clients can update alarm state; `alarm.syncLeadSeconds`, default `1.5`, controls initial alarm-state delivery time. `alarm.audio.chunkSamples` controls each local speaker buffer packet, default `128000`, and `alarm.audio.loopGapSeconds` controls the gap between completed loops.
+Alarm loop entries under `alarm.sounds` can also be WAV files, stitched WAV segments, or raw PCM sample tables. When a selected loop entry has `wav`, `files`, or `pcm`, it streams through AUKit-backed PCM chunks and waits for the full clip to finish before looping or rotating to the next alarm sound. With server-prepared audio enabled, the server broadcasts the prepared alarm buffer to remote computers instead of making each kiosk load the same WAV files. The server broadcasts `alarm.soundStartAt` before audio starts so clients can update alarm state; `alarm.syncLeadSeconds`, default `1.5`, controls initial alarm-state delivery time. `alarm.audio.chunkSamples` controls each local speaker buffer packet, default `128000`, and `alarm.audio.loopGapSeconds` controls the gap between completed loops.
 
 ```lua
 alarm = {

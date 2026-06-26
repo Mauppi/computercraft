@@ -6,6 +6,8 @@ local DEFAULTS_MODULE = "security_system_defaults"
 local REDNET_MODULE = "security_system_rednet"
 local NOTIFICATIONS_MODULE = "security_system_notifications"
 local ANNOUNCEMENTS_MODULE = "security_system_announcements"
+local AUDIO_MODULE = "security_system_audio"
+local AUKIT_MODULE = "aukit"
 
 if shell and shell.getRunningProgram and fs and package and package.path then
   local running = shell.getRunningProgram()
@@ -26,6 +28,8 @@ if package and package.loaded then
   package.loaded[REDNET_MODULE] = nil
   package.loaded[NOTIFICATIONS_MODULE] = nil
   package.loaded[ANNOUNCEMENTS_MODULE] = nil
+  package.loaded[AUDIO_MODULE] = nil
+  package.loaded[AUKIT_MODULE] = nil
 end
 
 local ok, app = pcall(require, APP_MODULE)

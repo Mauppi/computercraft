@@ -622,8 +622,8 @@ return {
     assetsRequired = true,
     assetBaseUrl = "https://raw.githubusercontent.com/Mauppi/computercraft/master/",
 
-    -- Speakers are discovered automatically. WAV/PCM entries loop through
-    -- speaker.playAudio before generated DSP fallback is used.
+    -- Speakers are discovered automatically. WAV/PCM entries are decoded and
+    -- streamed through AUKit before generated DSP fallback is used.
     sounds = {
       -- { wav = "announcements/red_alert.wav", volume = 1.2 },
       { files = { "announcements/red_alert_a.wav", "announcements/red_alert_a.wav", "announcements/red_alert_a.wav", "announcements/red_alert_b.wav", "announcements/red_alert_b.wav", "announcements/red_alert_b.wav" }, volume = 1.2 },
@@ -632,7 +632,7 @@ return {
       -- { name = "minecraft:block.note_block.bell", volume = 3, pitch = 1.8 },
     },
 
-    -- Uses speaker.playAudio when available. Existing Minecraft sounds remain
+    -- Uses AUKit-backed PCM playback when available. Existing Minecraft sounds remain
     -- as a fallback for older/simple speaker setups.
     dsp = {
       enabled = true,

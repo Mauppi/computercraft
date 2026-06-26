@@ -2,6 +2,8 @@
 
 local M = {}
 
+local securityAudio = require("security_system_audio")
+
 local DEFAULT_SAMPLE_RATE = 48000
 local wavCache = {}
 local wavCacheOrder = {}
@@ -290,96 +292,10 @@ function M.loadWav(path, config)
     return cached
   end
 
-  local data, err = readFile(path)
-  if not data then
+  local samples, err = securityAudio.loadWav(path, config)
+  if not (type(samples) == "table" and #samples > 0) then
     return nil, err
   end
-  if string.sub(data, 1, 4) ~= "RIFF" or string.sub(data, 9, 12) ~= "WAVE" then
-    return nil, "not a wav file"
-  end
-
-  local fmt = nil
-  local dataStart = nil
-  local dataSize = nil
-  local pos = 13
-  while pos + 7 <= #data do
-    local chunkId = string.sub(data, pos, pos + 3)
-    local chunkSize = u32le(data, pos + 4)
-    local chunkStart = pos + 8
-    if chunkId == "fmt " and chunkSize >= 16 then
-      fmt = {
-        audioFormat = u16le(data, chunkStart),
-        channels = u16le(data, chunkStart + 2),
-        sampleRate = u32le(data, chunkStart + 4),
-        blockAlign = u16le(data, chunkStart + 12),
-        bits = u16le(data, chunkStart + 14),
-      }
-    elseif chunkId == "data" then
-      dataStart = chunkStart
-      dataSize = chunkSize
-    end
-
-    pos = chunkStart + chunkSize
-    if chunkSize % 2 == 1 then
-      pos = pos + 1
-    end
-  end
-
-  if not fmt or not dataStart or not dataSize then
-    return nil, "wav missing fmt or data chunk"
-  end
-  if fmt.audioFormat ~= 1 then
-    return nil, "only PCM wav is supported"
-  end
-  if fmt.channels < 1 or (fmt.bits ~= 8 and fmt.bits ~= 16) then
-    return nil, "unsupported wav format"
-  end
-
-  local bytesPerSample = fmt.bits / 8
-  local frameSize = fmt.blockAlign
-  if frameSize <= 0 then
-    frameSize = fmt.channels * bytesPerSample
-  end
-
-  local samples = {}
-  local outIndex = 1
-  local last = math.min(#data + 1, dataStart + dataSize)
-  if fmt.channels == 1 and fmt.bits == 8 then
-    for frame = dataStart, last - frameSize, frameSize do
-      samples[outIndex] = (string.byte(data, frame) or 128) - 128
-      outIndex = outIndex + 1
-      if outIndex % 8192 == 0 then
-        cooperativeYield()
-      end
-    end
-  elseif fmt.channels == 1 and fmt.bits == 16 then
-    for frame = dataStart, last - frameSize, frameSize do
-      samples[outIndex] = math.floor(s16le(data, frame) / 256)
-      outIndex = outIndex + 1
-      if outIndex % 8192 == 0 then
-        cooperativeYield()
-      end
-    end
-  else
-    for frame = dataStart, last - frameSize, frameSize do
-      local total = 0
-      for channel = 0, fmt.channels - 1 do
-        local samplePos = frame + (channel * bytesPerSample)
-        if fmt.bits == 8 then
-          total = total + ((string.byte(data, samplePos) or 128) - 128)
-        else
-          total = total + math.floor(s16le(data, samplePos) / 256)
-        end
-      end
-      samples[outIndex] = clamp(total / fmt.channels)
-      outIndex = outIndex + 1
-      if outIndex % 8192 == 0 then
-        cooperativeYield()
-      end
-    end
-  end
-
-  samples = resample(samples, fmt.sampleRate, targetRate(config))
   putCachedWav(cacheKey, samples, config)
   return samples
 end
@@ -761,20 +677,7 @@ local function streamRefillSeconds(stream)
 end
 
 local function pcmChunk(pcm, firstIndex, lastIndex, clampSamples)
-  local chunk = {}
-  local outIndex = 1
-  if clampSamples then
-    for index = firstIndex, lastIndex do
-      chunk[outIndex] = clamp(pcm[index])
-      outIndex = outIndex + 1
-    end
-  else
-    for index = firstIndex, lastIndex do
-      chunk[outIndex] = pcm[index]
-      outIndex = outIndex + 1
-    end
-  end
-  return chunk
+  return securityAudio.pcmChunk(pcm, firstIndex, lastIndex, clampSamples)
 end
 
 local function feedStream(stream)
@@ -795,9 +698,9 @@ local function feedStream(stream)
     end
 
     local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
-    local chunk = pcmChunk(stream.pcm, stream.nextIndex, last, stream.clampSamples)
-
-    local ok, accepted = pcall(stream.speaker.playAudio, chunk, stream.volume)
+    local ok, accepted = securityAudio.playPcmRange(stream.speaker, stream.pcm, stream.nextIndex, last, stream.volume, {
+      clampSamples = stream.clampSamples,
+    })
     if not ok then
       stream.done = true
       stream.failed = true
@@ -900,7 +803,7 @@ local function playPcmOnSpeakers(speakers, pcm, volume, config)
   local deadline = os.clock() + (#pcm / math.max(1, sampleRate)) + graceSeconds
   local streams = {}
   for _, speaker in ipairs(speakers or {}) do
-    if speaker and speaker.playAudio then
+    if securityAudio.canPlayAudio(speaker) then
       streams[#streams + 1] = {
         speaker = speaker,
         pcm = pcm,
