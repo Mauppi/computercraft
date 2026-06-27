@@ -2089,6 +2089,7 @@ function eventAnnouncementContext(kind, title, text, severity, extra)
     context.door = context.door or extra.alarm.door
     context.profile = context.profile or extra.alarm.profile
   end
+  context.reason = context.reason or context.text or ""
   applyDoorAnnouncementContext(context, context.door)
   context.personnel = context.personnel or context.person or context.actor or context.user
   context.personnelKey = context.personnelKey or announcementKey(context.personnel)
@@ -2794,6 +2795,9 @@ function preparedAlarmSoundBuffer(profile, sound, soundIndex)
     buffer = buildDspAlarmBuffer(profile)
   end
   if type(buffer) == "table" and #buffer > 0 then
+    pcall(securityAudio.preparePlaybackPcm, buffer, {
+      sampleRate = alarmAudioConfig(profile).sampleRate,
+    })
     state.alarm.preparedAudioCache[key] = buffer
     return buffer
   end
@@ -3350,6 +3354,7 @@ function startPreparedAlarmAudioPlayback(stream)
         sourceFinished = alarmRemoteSourceFinished(stream, #stream.pcm),
         expectedSamples = tonumber(stream.totalSamples),
         sampleRate = tonumber(stream.sampleRate),
+        aukitPrepared = true,
         minStartSamples = remoteAlarmMinStartSamples(stream, profile),
         syncSkipLate = stream.appendComplete and nil or false,
       }) then
@@ -3405,6 +3410,7 @@ function startPreparedAudioPlayback(stream)
       allowDuringAlarm = allowDuringAlarm,
       generation = generation,
       startAtMillis = startAtMillis,
+      aukitPrepared = true,
     }) then
       played = true
     end
@@ -3521,6 +3527,15 @@ function broadcastPreparedAudio(kind, pcm, options)
     return false, options.startAtMillis
   end
 
+  local sampleRate = tonumber(options.sampleRate) or 48000
+  local preparedPcm, _, preparedRate = securityAudio.preparePlaybackPcm(pcm, {
+    sampleRate = sampleRate,
+  })
+  if type(preparedPcm) == "table" and #preparedPcm > 0 then
+    pcm = preparedPcm
+    sampleRate = tonumber(preparedRate) or sampleRate
+  end
+
   openRednet()
   local chunkSamples = preparedAudioChunkSamples()
   local yieldChunks = preparedAudioYieldChunks()
@@ -3534,7 +3549,7 @@ function broadcastPreparedAudio(kind, pcm, options)
     streamId = streamId,
     kind = kind or "announcement",
     profile = options.profile,
-    sampleRate = options.sampleRate or 48000,
+    sampleRate = sampleRate,
     volume = tonumber(options.volume) or 1,
     startAtMillis = startAtMillis,
     totalSamples = #pcm,
@@ -3663,8 +3678,10 @@ function alarmFeedSpeakerStream(speakerName)
 
     local last = math.min(availableSamples, stream.nextIndex + stream.chunkSamples - 1)
     stream.lastAttemptAt = os.clock()
-    local ok, accepted, queuedSamples = securityAudio.playPcmRange(stream.speaker, stream.pcm, stream.nextIndex, last, stream.volume, {
+    local ok, accepted, queuedSamples, playbackRate = securityAudio.playPcmRange(stream.speaker, stream.pcm, stream.nextIndex, last, stream.volume, {
       clampSamples = stream.clampSamples,
+      sampleRate = stream.sampleRate,
+      aukitPrepared = stream.aukitPrepared == true,
     })
     if not ok then
       state.alarm.audioStreams[speakerName] = nil
@@ -3681,7 +3698,7 @@ function alarmFeedSpeakerStream(speakerName)
     end
 
     local now = os.clock()
-    local sampleRate = math.max(1, tonumber(stream.sampleRate) or 48000)
+    local sampleRate = math.max(1, tonumber(playbackRate or stream.sampleRate) or 48000)
     local base = math.max(tonumber(stream.queuedUntil) or now, now)
     stream.queuedUntil = base + ((queuedSamples or 0) / sampleRate)
     stream.acceptedSamples = (tonumber(stream.acceptedSamples) or 0) + (queuedSamples or 0)
@@ -3740,15 +3757,28 @@ function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume, optio
   if sampleRate <= 0 then
     sampleRate = 48000
   end
+  if options.aukitPrepared ~= true and not options.source then
+    local preparedPcm, _, preparedRate = securityAudio.preparePlaybackPcm(pcm, {
+      sampleRate = sampleRate,
+    })
+    if type(preparedPcm) == "table" and #preparedPcm > 0 then
+      pcm = preparedPcm
+      sampleRate = tonumber(preparedRate) or sampleRate
+      options.aukitPrepared = true
+    end
+  end
   local chunkSamples = alarmPlaybackChunkSize(profile)
   local duration = #pcm / sampleRate
   local graceSeconds = tonumber(audioConfig.streamGraceSeconds) or 30
 
   if speakerName == "" then
     local last = math.min(#pcm, chunkSamples)
-    local ok, accepted, queuedSamples = securityAudio.playPcmRange(speaker, pcm, 1, last, volume)
+    local ok, accepted, queuedSamples, playbackRate = securityAudio.playPcmRange(speaker, pcm, 1, last, volume, {
+      sampleRate = sampleRate,
+      aukitPrepared = options.aukitPrepared == true,
+    })
     if ok and accepted ~= false then
-      state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, os.clock() + ((queuedSamples or last) / sampleRate))
+      state.alarm.audioPlayingUntil = math.max(tonumber(state.alarm.audioPlayingUntil) or 0, os.clock() + ((queuedSamples or last) / math.max(1, tonumber(playbackRate or sampleRate) or 48000)))
     end
     return ok and accepted ~= false
   end
@@ -3778,6 +3808,7 @@ function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume, optio
     sourceFinished = options.sourceFinished ~= false,
     expectedSamples = tonumber(options.expectedSamples),
     minStartSamples = tonumber(options.minStartSamples),
+    aukitPrepared = options.aukitPrepared == true,
   }
 
   local existing = state.alarm.audioStreams[speakerName]
@@ -4042,8 +4073,10 @@ function announcementFeedSpeakerStream(speakerName)
 
     local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
     stream.lastAttemptAt = os.clock()
-    local ok, accepted, queuedSamples = securityAudio.playPcmRange(stream.speaker, stream.pcm, stream.nextIndex, last, stream.volume, {
+    local ok, accepted, queuedSamples, playbackRate = securityAudio.playPcmRange(stream.speaker, stream.pcm, stream.nextIndex, last, stream.volume, {
       clampSamples = stream.clampSamples,
+      sampleRate = stream.sampleRate,
+      aukitPrepared = stream.aukitPrepared == true,
     })
     if not ok then
       state.announcements.audioStreams[speakerName] = nil
@@ -4060,7 +4093,7 @@ function announcementFeedSpeakerStream(speakerName)
     end
 
     local now = os.clock()
-    local sampleRate = math.max(1, tonumber(stream.sampleRate) or 48000)
+    local sampleRate = math.max(1, tonumber(playbackRate or stream.sampleRate) or 48000)
     local base = math.max(tonumber(stream.queuedUntil) or now, now)
     stream.queuedUntil = base + ((queuedSamples or 0) / sampleRate)
     stream.acceptedSamples = (tonumber(stream.acceptedSamples) or 0) + (queuedSamples or 0)
@@ -4174,6 +4207,16 @@ function startAnnouncementAudioStream(speakerName, speaker, pcm, volume, options
   if sampleRate <= 0 then
     sampleRate = 48000
   end
+  if options.aukitPrepared ~= true then
+    local preparedPcm, _, preparedRate = securityAudio.preparePlaybackPcm(pcm, {
+      sampleRate = sampleRate,
+    })
+    if type(preparedPcm) == "table" and #preparedPcm > 0 then
+      pcm = preparedPcm
+      sampleRate = tonumber(preparedRate) or sampleRate
+      options.aukitPrepared = true
+    end
+  end
   local duration = #pcm / sampleRate
   state.announcements.audioStreams = state.announcements.audioStreams or {}
   state.announcements.audioStreams[speakerName] = {
@@ -4195,6 +4238,7 @@ function startAnnouncementAudioStream(speakerName, speaker, pcm, volume, options
     startAtMillis = options.startAtMillis,
     clampSamples = false,
     allowDuringAlarm = options.allowDuringAlarm and true or false,
+    aukitPrepared = options.aukitPrepared == true,
   }
 
   local queued = announcementFeedSpeakerStream(speakerName)
@@ -4380,7 +4424,9 @@ function playDspAlarm(profile, speaker)
   end
 
   local dsp = profile.dsp or {}
-  local ok, accepted = securityAudio.playPcmRange(speaker, buffer, 1, #buffer, tonumber(dsp.volume) or 1)
+  local ok, accepted = securityAudio.playPcmRange(speaker, buffer, 1, #buffer, tonumber(dsp.volume) or 1, {
+    sampleRate = tonumber(dsp.sampleRate) or tonumber(profile.sampleRate) or 48000,
+  })
   return ok and accepted ~= false
 end
 
@@ -4552,7 +4598,7 @@ function raiseAlarm(reason, doorId, actor, profileName, options)
       setAlarmOutputs(false)
       clearAlarmAudioStreams(true)
       clearAnnouncementAudioStreams(true)
-      state.alarm.reason = reason or "emergency"
+      state.alarm.reason = tostring(reason or "emergency")
       state.alarm.door = doorId
       state.alarm.actor = actor
       state.alarm.profile = "emergency"
@@ -4566,7 +4612,7 @@ function raiseAlarm(reason, doorId, actor, profileName, options)
       setAlarmOutputs(true)
       pcall(playAlarmPulse)
       scheduleAlarmPulse()
-      sendChat((profile.label or "EMERGENCY") .. ": " .. state.alarm.reason, "emergency")
+      sendChat((profile.label or "EMERGENCY") .. ": " .. tostring(state.alarm.reason or ""), "emergency")
       broadcastEventNotification("emergency", profile.label or "Emergency Alarm", state.alarm.reason, "critical", {
         alarm = shallowCopy(state.alarm),
       })
@@ -4602,7 +4648,7 @@ function raiseAlarm(reason, doorId, actor, profileName, options)
   end
 
   state.alarm.active = true
-  state.alarm.reason = reason or "alarm"
+  state.alarm.reason = tostring(reason or "alarm")
   state.alarm.door = doorId
   state.alarm.actor = actor
   state.alarm.profile = profileName
@@ -4621,7 +4667,7 @@ function raiseAlarm(reason, doorId, actor, profileName, options)
   setAlarmOutputs(true)
   pcall(playAlarmPulse)
   scheduleAlarmPulse()
-  sendChat((profile.label or "ALARM") .. ": " .. state.alarm.reason, profileName)
+  sendChat((profile.label or "ALARM") .. ": " .. tostring(state.alarm.reason or ""), profileName)
   broadcastEventNotification(profileName == "emergency" and "emergency" or "alarm", profile.label or "Alarm", state.alarm.reason, profileName == "emergency" and "critical" or "warning", {
     alarm = shallowCopy(state.alarm),
   })
@@ -4635,9 +4681,11 @@ function raiseAlarm(reason, doorId, actor, profileName, options)
 end
 
 function resetAlarm(actor)
+  local resetActor = tostring(actor or "console")
+  local previousReason = tostring(state.alarm.reason or "alarm")
   local previousAlarm = {
     active = state.alarm.active,
-    reason = state.alarm.reason,
+    reason = previousReason,
     door = state.alarm.door,
     actor = state.alarm.actor,
     profile = state.alarm.profile,
@@ -4658,13 +4706,13 @@ function resetAlarm(actor)
   clearAlarmAutoResetSource()
   clearAlarmAudioStreams(true)
   clearAlarmPreparedAudioCache()
-  audit("ALARM_RESET", actor or "console")
+  audit("ALARM_RESET", resetActor)
   broadcastAlarmState()
-  broadcastEventNotification("alarm_reset", "Alarm Reset", "Alarm cleared by " .. tostring(actor or "console"), "info", {
-    actor = actor or "console",
+  broadcastEventNotification("alarm_reset", "Alarm Reset", "Alarm cleared by " .. resetActor, "info", {
+    actor = resetActor,
     alarm = previousAlarm,
     profile = previousAlarm.profile,
-    reason = previousAlarm.reason,
+    reason = previousReason,
     door = previousAlarm.door,
   })
   markDirty()

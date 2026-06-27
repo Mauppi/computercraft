@@ -10,6 +10,8 @@ if not okAukit then
   aukit = nil
 end
 
+local aukitPlaybackCache = setmetatable({}, { __mode = "k" })
+
 local function cooperativeYield()
   if sleep then
     sleep(0)
@@ -349,19 +351,110 @@ function M.canPlayAudio(speaker)
   return type(speaker) == "table" and type(speaker.playAudio) == "function"
 end
 
+local function playbackRate(options)
+  local rate = tonumber(options and options.sampleRate) or DEFAULT_SAMPLE_RATE
+  if rate <= 0 then
+    return DEFAULT_SAMPLE_RATE
+  end
+  return math.floor(rate)
+end
+
+function M.preparePlaybackPcm(pcm, options)
+  options = options or {}
+  if not (type(pcm) == "table" and #pcm > 0) then
+    return nil, "empty pcm"
+  end
+  if options.aukitPrepared == true then
+    return pcm, nil, playbackRate(options)
+  end
+  if not (aukit and aukit.pcm) then
+    return nil, "aukit unavailable"
+  end
+
+  local sourceRate = playbackRate(options)
+  local clampSamples = options.clampSamples == true
+  local bySource = aukitPlaybackCache[pcm]
+  if not bySource then
+    bySource = {}
+    aukitPlaybackCache[pcm] = bySource
+  end
+
+  local key = tostring(#pcm) .. ":" .. tostring(sourceRate) .. ":" .. tostring(clampSamples)
+  local cached = bySource[key]
+  if cached then
+    return cached.samples, nil, cached.rate
+  end
+
+  local raw = clampSamples and M.pcmChunk(pcm, 1, #pcm, true) or pcm
+  if #raw == 0 then
+    return raw, nil, DEFAULT_SAMPLE_RATE
+  end
+
+  local okAudio, audio = pcall(aukit.pcm, raw, 8, "signed", 1, sourceRate, true, false)
+  if not okAudio or not audio then
+    return nil, audio or "aukit pcm conversion failed"
+  end
+
+  local rate = sourceRate
+  if rate ~= DEFAULT_SAMPLE_RATE and audio.resample then
+    local okResample, resampled = pcall(audio.resample, audio, DEFAULT_SAMPLE_RATE)
+    if okResample and resampled then
+      audio = resampled
+      rate = DEFAULT_SAMPLE_RATE
+    end
+  end
+
+  local okSamples, samples = pcall(audio.pcm, audio, 8, "signed", true)
+  if not okSamples or type(samples) ~= "table" or #samples == 0 then
+    return nil, samples or "aukit pcm export failed"
+  end
+
+  for index = 1, #samples do
+    samples[index] = clampSample(samples[index])
+    if index % 8192 == 0 then
+      cooperativeYield()
+    end
+  end
+
+  bySource[key] = {
+    samples = samples,
+    rate = rate,
+  }
+  return samples, nil, rate
+end
+
+function M.aukitPcmRange(pcm, firstIndex, lastIndex, options)
+  options = options or {}
+  firstIndex = math.max(1, math.floor(tonumber(firstIndex) or 1))
+  lastIndex = math.floor(tonumber(lastIndex) or firstIndex)
+  if lastIndex < firstIndex then
+    return {}, nil, playbackRate(options)
+  end
+
+  local prepared, err, rate = M.preparePlaybackPcm(pcm, options)
+  if not prepared then
+    return nil, err
+  end
+  return M.pcmChunk(prepared, firstIndex, lastIndex, false), nil, rate
+end
+
 function M.playPcmRange(speaker, pcm, firstIndex, lastIndex, volume, options)
   if not (M.canPlayAudio(speaker) and type(pcm) == "table" and #pcm > 0) then
     return false, false, 0
   end
 
   options = options or {}
-  local chunk = M.pcmChunk(pcm, firstIndex, lastIndex, options.clampSamples == true)
+  local chunk, _, rate = M.aukitPcmRange(pcm, firstIndex, lastIndex, options)
+  if not chunk then
+    chunk = M.pcmChunk(pcm, firstIndex, lastIndex, options.clampSamples == true)
+    rate = playbackRate(options)
+  end
   if #chunk == 0 then
-    return true, false, 0
+    return true, false, 0, rate
   end
 
   local ok, accepted = pcall(speaker.playAudio, chunk, volume)
-  return ok, accepted, #chunk
+  return ok, accepted, #chunk, rate
 end
 
 function M.playAukitChunk(speaker, chunk, volume)
@@ -524,8 +617,10 @@ local function feedStream(stream)
     end
 
     local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
-    local ok, accepted, queuedSamples = M.playPcmRange(stream.speaker, stream.pcm, stream.nextIndex, last, stream.volume, {
+    local ok, accepted, queuedSamples, rate = M.playPcmRange(stream.speaker, stream.pcm, stream.nextIndex, last, stream.volume, {
       clampSamples = stream.clampSamples,
+      sampleRate = stream.sampleRate,
+      aukitPrepared = stream.aukitPrepared == true,
     })
     if not ok then
       stream.done = true
@@ -537,7 +632,7 @@ local function feedStream(stream)
     end
 
     local now = os.clock()
-    local sampleRate = math.max(1, tonumber(stream.sampleRate) or DEFAULT_SAMPLE_RATE)
+    local sampleRate = math.max(1, tonumber(rate or stream.sampleRate) or DEFAULT_SAMPLE_RATE)
     local base = math.max(tonumber(stream.queuedUntil) or now, now)
     stream.queuedUntil = base + ((queuedSamples or 0) / sampleRate)
     stream.started = true
@@ -603,6 +698,15 @@ function M.playPcmOnSpeakers(speakers, pcm, volume, config)
 
   local chunkSamples = playbackChunkSamples(config or {})
   local sampleRate = targetRate(config or {})
+  local aukitPrepared = false
+  local preparedPcm, _, preparedRate = M.preparePlaybackPcm(pcm, {
+    sampleRate = sampleRate,
+  })
+  if type(preparedPcm) == "table" and #preparedPcm > 0 then
+    pcm = preparedPcm
+    sampleRate = tonumber(preparedRate) or sampleRate
+    aukitPrepared = true
+  end
   local graceSeconds = tonumber(config and config.streamGraceSeconds) or 30
   local tailSeconds = tonumber(config and config.tailSeconds) or 0.5
   local maxChunksPerFeed = tonumber(config and config.maxChunksPerFeed) or 2
@@ -625,6 +729,7 @@ function M.playPcmOnSpeakers(speakers, pcm, volume, config)
         prebufferSeconds = prebufferSeconds,
         refillSeconds = refillSeconds,
         clampSamples = clampSamples,
+        aukitPrepared = aukitPrepared,
       }
     end
   end

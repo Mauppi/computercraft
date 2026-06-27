@@ -83,7 +83,7 @@ local FALLBACK_MANIFEST = {
       path = AUDIO_MODULE_FILE,
       required = true,
       minSize = 1000,
-      contains = { "AUKit-backed audio helpers", "function M.loadWav", "function M.playPcmRange", "function M.packPcmSamples" },
+      contains = { "AUKit-backed audio helpers", "function M.loadWav", "function M.preparePlaybackPcm", "function M.aukitPcmRange", "function M.playPcmRange", "function M.packPcmSamples" },
     },
     {
       path = NOTIFICATIONS_MODULE_FILE,

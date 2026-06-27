@@ -118,6 +118,8 @@ return {
       contains = {
         "AUKit-backed audio helpers",
         "function M.loadWav",
+        "function M.preparePlaybackPcm",
+        "function M.aukitPcmRange",
         "function M.playPcmRange",
         "function M.packPcmSamples",
       },

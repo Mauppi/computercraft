@@ -698,8 +698,10 @@ local function feedStream(stream)
     end
 
     local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
-    local ok, accepted = securityAudio.playPcmRange(stream.speaker, stream.pcm, stream.nextIndex, last, stream.volume, {
+    local ok, accepted, queuedSamples, rate = securityAudio.playPcmRange(stream.speaker, stream.pcm, stream.nextIndex, last, stream.volume, {
       clampSamples = stream.clampSamples,
+      sampleRate = stream.sampleRate,
+      aukitPrepared = stream.aukitPrepared == true,
     })
     if not ok then
       stream.done = true
@@ -711,8 +713,8 @@ local function feedStream(stream)
     end
 
     local now = os.clock()
-    local queuedSamples = last - stream.nextIndex + 1
-    local sampleRate = math.max(1, tonumber(stream.sampleRate) or DEFAULT_SAMPLE_RATE)
+    queuedSamples = queuedSamples or (last - stream.nextIndex + 1)
+    local sampleRate = math.max(1, tonumber(rate or stream.sampleRate) or DEFAULT_SAMPLE_RATE)
     local base = math.max(tonumber(stream.queuedUntil) or now, now)
     stream.queuedUntil = base + (queuedSamples / sampleRate)
     stream.started = true
@@ -794,6 +796,15 @@ local function playPcmOnSpeakers(speakers, pcm, volume, config)
 
   local chunkSamples = playbackChunkSamples(config or {})
   local sampleRate = targetRate(config or {})
+  local aukitPrepared = false
+  local preparedPcm, _, preparedRate = securityAudio.preparePlaybackPcm(pcm, {
+    sampleRate = sampleRate,
+  })
+  if type(preparedPcm) == "table" and #preparedPcm > 0 then
+    pcm = preparedPcm
+    sampleRate = tonumber(preparedRate) or sampleRate
+    aukitPrepared = true
+  end
   local graceSeconds = tonumber(config and config.streamGraceSeconds) or 30
   local tailSeconds = tonumber(config and config.tailSeconds) or 0.5
   local maxChunksPerFeed = tonumber(config and config.maxChunksPerFeed) or 2
@@ -816,6 +827,7 @@ local function playPcmOnSpeakers(speakers, pcm, volume, config)
         prebufferSeconds = prebufferSeconds,
         refillSeconds = refillSeconds,
         clampSamples = clampSamples,
+        aukitPrepared = aukitPrepared,
       }
     end
   end
