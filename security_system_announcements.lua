@@ -624,13 +624,13 @@ end
 
 local function playbackChunkSamples(config)
   local audio = type(config and config.audio) == "table" and config.audio or {}
-  local samples = tonumber(audio.chunkSamples or audio.playbackSamples or config.chunkSamples or config.playbackSamples) or 24000
+  local samples = tonumber(audio.chunkSamples or audio.playbackSamples or config.chunkSamples or config.playbackSamples) or 48000
   if samples <= 0 then
-    samples = 24000
+    samples = 48000
   end
   samples = math.floor(samples)
-  if samples < 1024 then
-    return 1024
+  if samples < 48000 then
+    return 48000
   end
   if samples > 128000 then
     return 128000
@@ -676,6 +676,25 @@ local function streamRefillSeconds(stream)
   return seconds
 end
 
+local function speakerQueueBusy(stream, accepted)
+  if accepted == false then
+    return true
+  end
+  if accepted ~= nil then
+    return false
+  end
+  local queuedUntil = tonumber(stream and stream.queuedUntil)
+  return queuedUntil and queuedUntil > os.clock() + 0.02
+end
+
+local function speakerQueueLikelyBusy(stream)
+  if not (stream and stream.acceptanceUnknown) then
+    return false
+  end
+  local queuedUntil = tonumber(stream.queuedUntil)
+  return queuedUntil and queuedUntil > os.clock() + 0.02
+end
+
 local function pcmChunk(pcm, firstIndex, lastIndex, clampSamples)
   return securityAudio.pcmChunk(pcm, firstIndex, lastIndex, clampSamples)
 end
@@ -696,6 +715,9 @@ local function feedStream(stream)
     if fedChunks > 0 and stream.queuedUntil and stream.queuedUntil >= targetQueuedUntil then
       break
     end
+    if speakerQueueLikelyBusy(stream) then
+      return acceptedAny
+    end
 
     local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
     local ok, accepted, queuedSamples, rate = securityAudio.playPcmRange(stream.speaker, stream.pcm, stream.nextIndex, last, stream.volume, {
@@ -708,7 +730,7 @@ local function feedStream(stream)
       stream.failed = true
       return acceptedAny
     end
-    if accepted == false then
+    if speakerQueueBusy(stream, accepted) then
       return acceptedAny
     end
 
@@ -718,6 +740,7 @@ local function feedStream(stream)
     local base = math.max(tonumber(stream.queuedUntil) or now, now)
     stream.queuedUntil = base + (queuedSamples / sampleRate)
     stream.started = true
+    stream.acceptanceUnknown = accepted == nil
     acceptedAny = true
     stream.nextIndex = last + 1
     fedChunks = fedChunks + 1

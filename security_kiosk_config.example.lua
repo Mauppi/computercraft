@@ -79,7 +79,7 @@ return {
     volume = 1,
     sampleRate = 48000,
     maxSamples = 128000,
-    chunkSamples = 24000,
+    chunkSamples = 48000,
     streamGraceSeconds = 30,
     watchdogSeconds = 0.25,
     idleWatchdogSeconds = 2,
@@ -477,7 +477,7 @@ return {
     sampleRate = 48000,
     maxSamples = 128000,
     audio = {
-      chunkSamples = 24000,
+      chunkSamples = 48000,
       loopGapSeconds = 0.05,
     },
     syncAssets = true,

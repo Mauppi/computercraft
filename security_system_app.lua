@@ -395,7 +395,7 @@ function installKioskConfigIfMissing()
   handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
   handle.writeLine("  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.5, idlePollSeconds = 5 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 24000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 4096, remoteAudioYieldChunks = 4, remoteAudioYieldSeconds = 0.03, remoteAudioLeadSeconds = 1, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 48000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 4096, remoteAudioYieldChunks = 4, remoteAudioYieldSeconds = 0.03, remoteAudioLeadSeconds = 1, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
@@ -2663,7 +2663,7 @@ function alarmAudioConfig(profile)
   return {
     sampleRate = audio.sampleRate or profile.sampleRate or dsp.sampleRate or 48000,
     maxSamples = audio.maxSamples or profile.maxSamples or dsp.maxSamples or 128000,
-    chunkSamples = audio.chunkSamples or profile.chunkSamples or audio.playbackSamples or profile.playbackSamples or 24000,
+    chunkSamples = audio.chunkSamples or profile.chunkSamples or audio.playbackSamples or profile.playbackSamples or 48000,
     loopGapSeconds = audio.loopGapSeconds or profile.loopGapSeconds or 0.05,
     streamGraceSeconds = audio.streamGraceSeconds or profile.streamGraceSeconds or announcements.streamGraceSeconds or 30,
     tailSeconds = audio.tailSeconds or profile.tailSeconds or announcements.tailSeconds or 0.5,
@@ -2829,15 +2829,15 @@ end
 
 function alarmPlaybackChunkSize(profile)
   local audioConfig = alarmAudioConfig(profile)
-  local chunkSamples = tonumber(audioConfig.chunkSamples) or 24000
+  local chunkSamples = tonumber(audioConfig.chunkSamples) or 48000
   if chunkSamples <= 0 then
-    chunkSamples = 24000
+    chunkSamples = 48000
   end
   chunkSamples = math.floor(chunkSamples)
-  if chunkSamples < 1024 then
-    chunkSamples = 1024
-  elseif chunkSamples > 48000 then
+  if chunkSamples < 48000 then
     chunkSamples = 48000
+  elseif chunkSamples > 128000 then
+    chunkSamples = 128000
   end
   return chunkSamples
 end
@@ -2987,6 +2987,35 @@ function streamRefillSeconds(stream)
     return prebufferSeconds
   end
   return seconds
+end
+
+function streamSpeakerQueueBusy(stream, accepted)
+  if accepted == false then
+    return true
+  end
+  if accepted ~= nil then
+    return false
+  end
+  local queuedUntil = tonumber(stream and stream.queuedUntil)
+  return queuedUntil and queuedUntil > os.clock() + 0.02
+end
+
+function streamSpeakerQueueLikelyBusy(stream)
+  if not (stream and stream.acceptanceUnknown) then
+    return false
+  end
+  local queuedUntil = tonumber(stream.queuedUntil)
+  return queuedUntil and queuedUntil > os.clock() + 0.02
+end
+
+function deferStreamAfterBusySpeaker(stream)
+  local graceSeconds = tonumber(stream and stream.graceSeconds) or 30
+  local queuedUntil = tonumber(stream and stream.queuedUntil)
+  if queuedUntil then
+    stream.deadline = math.max(tonumber(stream.deadline) or 0, queuedUntil + graceSeconds)
+  else
+    stream.deadline = math.max(tonumber(stream.deadline) or 0, os.clock() + graceSeconds)
+  end
 end
 
 function pcmChunk(pcm, firstIndex, lastIndex, clampSamples)
@@ -3675,6 +3704,9 @@ function alarmFeedSpeakerStream(speakerName)
     if fedChunks > 0 and stream.queuedUntil and stream.queuedUntil >= targetQueuedUntil then
       break
     end
+    if streamSpeakerQueueLikelyBusy(stream) then
+      return true
+    end
 
     local last = math.min(availableSamples, stream.nextIndex + stream.chunkSamples - 1)
     stream.lastAttemptAt = os.clock()
@@ -3687,13 +3719,8 @@ function alarmFeedSpeakerStream(speakerName)
       state.alarm.audioStreams[speakerName] = nil
       return false
     end
-    if accepted == false then
-      local graceSeconds = tonumber(stream.graceSeconds) or 30
-      if stream.queuedUntil then
-        stream.deadline = math.max(tonumber(stream.deadline) or 0, stream.queuedUntil + graceSeconds)
-      else
-        stream.deadline = math.max(tonumber(stream.deadline) or 0, os.clock() + graceSeconds)
-      end
+    if streamSpeakerQueueBusy(stream, accepted) then
+      deferStreamAfterBusySpeaker(stream)
       return true
     end
 
@@ -3702,6 +3729,7 @@ function alarmFeedSpeakerStream(speakerName)
     local base = math.max(tonumber(stream.queuedUntil) or now, now)
     stream.queuedUntil = base + ((queuedSamples or 0) / sampleRate)
     stream.acceptedSamples = (tonumber(stream.acceptedSamples) or 0) + (queuedSamples or 0)
+    stream.acceptanceUnknown = accepted == nil
     stream.startedPlaybackAt = stream.startedPlaybackAt or now
     stream.nextIndex = last + 1
     stream.lastQueuedAt = now
@@ -3850,7 +3878,7 @@ function announcementAudioConfig()
   local audio = type(announcements.audio) == "table" and announcements.audio or {}
   return {
     sampleRate = audio.sampleRate or announcements.sampleRate or 48000,
-    chunkSamples = audio.chunkSamples or announcements.chunkSamples or audio.playbackSamples or announcements.playbackSamples or 24000,
+    chunkSamples = audio.chunkSamples or announcements.chunkSamples or audio.playbackSamples or announcements.playbackSamples or 48000,
     volume = announcements.volume or audio.volume or 1,
     streamGraceSeconds = audio.streamGraceSeconds or announcements.streamGraceSeconds or 30,
     watchdogSeconds = audio.watchdogSeconds or announcements.watchdogSeconds or 0.1,
@@ -3963,13 +3991,13 @@ end
 
 function announcementPlaybackChunkSize()
   local audioConfig = announcementAudioConfig()
-  local chunkSamples = tonumber(audioConfig.chunkSamples) or 128000
+  local chunkSamples = tonumber(audioConfig.chunkSamples) or 48000
   if chunkSamples <= 0 then
-    chunkSamples = 128000
+    chunkSamples = 48000
   end
   chunkSamples = math.floor(chunkSamples)
-  if chunkSamples < 1024 then
-    return 1024
+  if chunkSamples < 48000 then
+    return 48000
   end
   if chunkSamples > 128000 then
     return 128000
@@ -4070,6 +4098,9 @@ function announcementFeedSpeakerStream(speakerName)
     if fedChunks > 0 and stream.queuedUntil and stream.queuedUntil >= targetQueuedUntil then
       break
     end
+    if streamSpeakerQueueLikelyBusy(stream) then
+      return true
+    end
 
     local last = math.min(#stream.pcm, stream.nextIndex + stream.chunkSamples - 1)
     stream.lastAttemptAt = os.clock()
@@ -4082,13 +4113,8 @@ function announcementFeedSpeakerStream(speakerName)
       state.announcements.audioStreams[speakerName] = nil
       return false
     end
-    if accepted == false then
-      local graceSeconds = tonumber(stream.graceSeconds) or 30
-      if stream.queuedUntil then
-        stream.deadline = math.max(tonumber(stream.deadline) or 0, stream.queuedUntil + graceSeconds)
-      else
-        stream.deadline = math.max(tonumber(stream.deadline) or 0, os.clock() + graceSeconds)
-      end
+    if streamSpeakerQueueBusy(stream, accepted) then
+      deferStreamAfterBusySpeaker(stream)
       return true
     end
 
@@ -4097,6 +4123,7 @@ function announcementFeedSpeakerStream(speakerName)
     local base = math.max(tonumber(stream.queuedUntil) or now, now)
     stream.queuedUntil = base + ((queuedSamples or 0) / sampleRate)
     stream.acceptedSamples = (tonumber(stream.acceptedSamples) or 0) + (queuedSamples or 0)
+    stream.acceptanceUnknown = accepted == nil
     stream.started = true
     stream.nextIndex = last + 1
     stream.lastQueuedAt = now
