@@ -201,10 +201,10 @@ return {
     serverPlayback = true,
     serverPreparedAudio = true,
     clientAudioSynthesis = false,
-    remoteAudioChunkSamples = 4096,
-    remoteAudioYieldChunks = 4,
-    remoteAudioYieldSeconds = 0.03,
-    remoteAudioLeadSeconds = 1,
+    remoteAudioChunkSamples = 12000,
+    remoteAudioYieldChunks = 1,
+    remoteAudioYieldSeconds = 0.05,
+    remoteAudioLeadSeconds = 2.5,
     alarmAnnouncements = true,
     queueLimit = 12,
     syncAssets = true,
@@ -608,6 +608,7 @@ return {
   },
 
   alarm = {
+    stateFile = "security_alarm_state.lua",
     repeatSeconds = 1.25,
     syncLeadSeconds = 1.5,
     syncToleranceSeconds = 0.08,

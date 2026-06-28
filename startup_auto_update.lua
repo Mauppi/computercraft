@@ -16,6 +16,7 @@ local AUKIT_FILE = "aukit.lua"
 local CONFIG_FILE = "security_config.lua"
 local KIOSK_CONFIG_EXAMPLE = "security_kiosk_config.example.lua"
 local LOCAL_DATA_FILE = "security_local_data.lua"
+local ALARM_STATE_FILE = "security_alarm_state.lua"
 local INSTALL_SUBDIR = "security_system"
 local MIN_DISK_INSTALL_FREE = 384000
 local INSTALL_ROOT = ""
@@ -101,7 +102,7 @@ local FALLBACK_MANIFEST = {
       path = APP_MODULE_FILE,
       required = true,
       minSize = 2000,
-      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "security_system_audio", "DEFAULT_CONFIG_URL", "installRemoteConfigIfMissing", "installKioskConfigIfMissing", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "wrapEndpointPeripheral", "pulseSeconds", "setAnalogueOutput", "readerKindFor", "printReaderSourceHints", "kioskSetupReaderHints", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "alarmAudioStreamLoop", "speaker_audio_empty", "alarmSyncLeadMillis", "soundStartAt", "serverTimeMillis", "serverMillisToLocalMillis", "ensureNotificationPlaybackSchedule", "alignAnnouncementPcmToSchedule", "alignAlarmPcmToSchedule", "doorAnnouncementFields", "configuredEventAnnouncement", "personnel_request", "personnelRequestFields", "personnelReasonFields", "personnelTitleLabel", "kioskLocationArea", "kioskPaRequest", "configuredAnnouncement", "configuredAnnouncementHasAudio", "voiceLines", "alarmAnnouncementSuppressionActive", "announcementCanPlayDuringAlarm", "prebufferSeconds", "idleWatchdogSeconds", "audioWatchdogDelaySeconds", "preparedAudioYieldChunks", "invalidateMonitorCache", "broadcastActionAnnouncement", "notificationUsesAnnouncementAudio", "announcementIsAlarmLike", "playFacilityAnnouncement", "pruneAnnouncementAudioStreams", "feedAnnouncementAudioStreams", "handleAnnouncementSpeakerAudioEmpty", "includeAlarm", "function main()", "return {" },
+      contains = { "CC: Tweaked security system", "security_system_defaults", "security_system_rednet", "security_system_notifications", "security_system_announcements", "security_system_audio", "DEFAULT_CONFIG_URL", "installRemoteConfigIfMissing", "installKioskConfigIfMissing", "function controllerMain()", "kiosk_setup", "kiosk_badge_login", "controller_credential", "wrapEndpointPeripheral", "pulseSeconds", "setAnalogueOutput", "readerKindFor", "printReaderSourceHints", "kioskSetupReaderHints", "kioskLocalControllerLoop", "kiosk.controller", "remove_door", "playAlarmAudioSound", "alarmAudioStreamLoop", "speaker_audio_empty", "alarmSyncLeadMillis", "saveAlarmState", "loadAlarmState", "restoreAlarmRuntime", "soundStartAt", "serverTimeMillis", "serverMillisToLocalMillis", "ensureNotificationPlaybackSchedule", "alignAnnouncementPcmToSchedule", "alignAlarmPcmToSchedule", "doorAnnouncementFields", "configuredEventAnnouncement", "personnel_request", "personnelRequestFields", "personnelReasonFields", "personnelTitleLabel", "kioskLocationArea", "kioskPaRequest", "configuredAnnouncement", "configuredAnnouncementHasAudio", "voiceLines", "alarmAnnouncementSuppressionActive", "announcementCanPlayDuringAlarm", "prebufferSeconds", "idleWatchdogSeconds", "audioWatchdogDelaySeconds", "preparedAudioYieldChunks", "invalidateMonitorCache", "broadcastActionAnnouncement", "notificationUsesAnnouncementAudio", "announcementIsAlarmLike", "playFacilityAnnouncement", "pruneAnnouncementAudioStreams", "feedAnnouncementAudioStreams", "handleAnnouncementSpeakerAudioEmpty", "includeAlarm", "function main()", "return {" },
     },
     {
       path = PROGRAM,
@@ -499,7 +500,7 @@ local function writeFallbackKioskConfig()
     "  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },",
     "  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.5, idlePollSeconds = 5 } },",
     "  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },",
-    "  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 48000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 4096, remoteAudioYieldChunks = 4, remoteAudioYieldSeconds = 0.03, remoteAudioLeadSeconds = 1, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },",
+    "  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 48000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 12000, remoteAudioYieldChunks = 1, remoteAudioYieldSeconds = 0.05, remoteAudioLeadSeconds = 2.5, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },",
     "  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },",
     "}",
   }
@@ -735,6 +736,7 @@ local PRESERVED_CONFIG_PATHS = {
   { "kiosk", "zone" },
   { "monitors", "devices" },
   { "rednet", "serverId" },
+  { "alarm", "stateFile" },
   { "employees", "accountsFile" },
   { "employees", "socialFile" },
 }
@@ -906,6 +908,7 @@ local function protectedLocalStatePath(path)
   local name = baseName(path)
   return name == CONFIG_FILE
     or name == LOCAL_DATA_FILE
+    or name == ALARM_STATE_FILE
     or name == "security_accounts.lua"
     or name == "security_social.lua"
     or name == "security_audit.log"
@@ -1423,6 +1426,7 @@ local function selfUpdateFileEntry(manifest)
         "SELF_UPDATE_FILE",
         "selfUpdateFromGithub",
         "security_local_data.lua",
+        "security_alarm_state.lua",
         "applyLocalDataToConfig",
         "localDataForMode",
         "localDataSummary",
@@ -1445,6 +1449,7 @@ local function selfUpdateFileEntry(manifest)
       "SELF_UPDATE_FILE",
       "selfUpdateFromGithub",
       "security_local_data.lua",
+      "security_alarm_state.lua",
       "applyLocalDataToConfig",
       "localDataForMode",
       "localDataSummary",

@@ -10,6 +10,7 @@ local DEFAULT_CONFIG_URL = "https://raw.githubusercontent.com/Mauppi/computercra
 local LOG_FILE = "security_audit.log"
 local ACCOUNTS_FILE = "security_accounts.lua"
 local SOCIAL_FILE = "security_social.lua"
+local ALARM_STATE_FILE = "security_alarm_state.lua"
 local KIOSK_CONFIG_EXAMPLE = "security_kiosk_config.example.lua"
 local KIOSK_EXIT_FILE = ".security_kiosk_exit"
 local PROTOCOL = "cc_security_v1"
@@ -395,7 +396,7 @@ function installKioskConfigIfMissing()
   handle.writeLine("  configSync = { enabled = true, includeMonitors = true, includeAnnouncements = true, includeAlarm = true },")
   handle.writeLine("  kiosk = { locked = true, area = \"\", locationArea = \"\", syncSeconds = 2, alarmSoundSeconds = 1.5, quitClearance = 5, autoLogoutSeconds = 600, autoRebootLoggedOutSeconds = 1800, controller = { enabled = false, permanent = false, credentialForwarding = true, helloSeconds = 30, pollSeconds = 0.5, idlePollSeconds = 5 } },")
   handle.writeLine("  notifications = { enabled = true, maxItems = 12, sound = true, sampleRate = 48000, maxSamples = 128000, wavKinds = { dm = true, social = true } },")
-  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 48000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 4096, remoteAudioYieldChunks = 4, remoteAudioYieldSeconds = 0.03, remoteAudioLeadSeconds = 1, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },")
+  handle.writeLine("  announcements = { enabled = true, sound = true, voice = false, syntheticVoice = false, requireVoiceLine = true, volume = 1, sampleRate = 48000, maxSamples = 128000, chunkSamples = 48000, streamGraceSeconds = 30, watchdogSeconds = 0.25, idleWatchdogSeconds = 2, tailSeconds = 0.5, maxChunksPerFeed = 8, prebufferSeconds = 2.5, refillSeconds = 0.75, syncLeadSeconds = 1.5, syncToleranceSeconds = 0.08, syncSkipLate = true, serverPlayback = true, serverPreparedAudio = true, clientAudioSynthesis = false, remoteAudioChunkSamples = 12000, remoteAudioYieldChunks = 1, remoteAudioYieldSeconds = 0.05, remoteAudioLeadSeconds = 2.5, alarmAnnouncements = true, queueLimit = 12, syncAssets = true, assetsRequired = false },")
   handle.writeLine("  branding = { facilityName = \"Facility\", shortName = \"SEC\", kioskTitle = \"Employee Kiosk\" },")
   handle.writeLine("}")
   handle.close()
@@ -664,6 +665,129 @@ function saveDataFile(path, value)
   handle.writeLine("-- Saved by security_system.lua.")
   handle.writeLine("return " .. textutils.serialize(value or {}))
   handle.close()
+end
+
+function alarmStatePath()
+  local alarm = config and config.alarm or {}
+  return alarm.stateFile or alarm.statePath or ALARM_STATE_FILE
+end
+
+function alarmStateRecord()
+  local alarm = state.alarm or {}
+  return {
+    active = alarm.active and true or false,
+    reason = alarm.reason,
+    actor = alarm.actor,
+    door = alarm.door,
+    profile = alarm.profile,
+    sinceMillis = alarm.sinceMillis,
+    soundStartAt = alarm.soundStartAt,
+    soundIndex = alarm.active and alarm.soundIndex or 1,
+    sourceKey = alarm.sourceKey,
+    sourceAutoReset = alarm.sourceAutoReset and true or false,
+    sourceAutoResetSeconds = alarm.sourceAutoResetSeconds,
+  }
+end
+
+function savedAlarmRecord(value)
+  if type(value) ~= "table" then
+    return nil
+  end
+  if type(value.alarm) == "table" then
+    return value.alarm
+  end
+  if value.active ~= nil or value.reason ~= nil or value.profile ~= nil then
+    return value
+  end
+  return nil
+end
+
+function alarmStateSavePayload()
+  return {
+    version = 1,
+    savedAtMillis = nowMillis(),
+    alarm = alarmStateRecord(),
+  }
+end
+
+function saveAlarmState()
+  local path = alarmStatePath()
+  local ok, err = pcall(saveDataFile, path, alarmStateSavePayload())
+  if not ok then
+    audit("DATA_SAVE_ERROR", { path = path, error = err })
+    return false, err
+  end
+  return true
+end
+
+function applySavedAlarmState(value)
+  local alarm = savedAlarmRecord(value)
+  if not alarm then
+    return false
+  end
+
+  local active = alarm.active and true or false
+  state.alarm.active = active
+  state.alarm.reason = active and alarm.reason or nil
+  state.alarm.actor = active and alarm.actor or nil
+  state.alarm.door = active and alarm.door or nil
+  state.alarm.profile = active and alarm.profile or nil
+  state.alarm.since = active and os.clock() or nil
+  state.alarm.sinceMillis = active and (tonumber(alarm.sinceMillis) or nowMillis()) or nil
+  state.alarm.soundStartAt = active and (tonumber(alarm.soundStartAt) or nowMillis()) or nil
+  state.alarm.soundIndex = active and math.max(1, math.floor(tonumber(alarm.soundIndex) or 1)) or 1
+  state.alarm.sourceKey = active and alarm.sourceKey or nil
+  state.alarm.sourceAutoReset = active and alarm.sourceAutoReset == true
+  state.alarm.sourceAutoResetSeconds = active and tonumber(alarm.sourceAutoResetSeconds) or nil
+  state.alarm.sourceAutoResetAfter = nil
+  if state.alarm.active and state.alarm.sourceAutoReset and state.alarm.sourceKey then
+    local delay = state.alarm.sourceAutoResetSeconds
+    if not delay and type(sensorAutoResetDelaySeconds) == "function" then
+      delay = sensorAutoResetDelaySeconds(nil)
+    end
+    state.alarm.sourceAutoResetAfter = os.clock() + (tonumber(delay) or 5)
+  end
+  state.alarm.audioStreams = {}
+  state.alarm.pendingAudioStreams = {}
+  state.alarm.audioPlayingUntil = 0
+  state.alarm.audioGeneration = (tonumber(state.alarm.audioGeneration) or 0) + 1
+  state.alarm.audioCache = state.alarm.audioCache or {}
+  state.alarm.preparedAudioCache = {}
+  return true
+end
+
+function loadAlarmState()
+  local path = alarmStatePath()
+  local value = loadDataFile(path, {})
+  if not applySavedAlarmState(value) then
+    return false
+  end
+  if state.alarm.active then
+    audit("ALARM_STATE_LOAD", {
+      reason = state.alarm.reason,
+      profile = state.alarm.profile,
+    })
+  end
+  return true
+end
+
+function restoreAlarmRuntime(broadcast, schedulePulse)
+  if not state.alarm.active then
+    return false
+  end
+  clearAlarmAudioStreams(true)
+  clearAlarmPreparedAudioCache()
+  pcall(prepareAlarmSoundCache, state.alarm.profile)
+  setAlarmOutputs(true)
+  pcall(playAlarmPulse)
+  if schedulePulse ~= false then
+    scheduleAlarmPulse()
+  end
+  if broadcast then
+    broadcastAlarmState()
+  end
+  markDirty()
+  return true
 end
 
 function nowMillis()
@@ -1546,6 +1670,7 @@ function alarmStatePayload()
       soundStartAt = state.alarm.soundStartAt,
       sourceKey = state.alarm.sourceKey,
       sourceAutoReset = state.alarm.sourceAutoReset,
+      sourceAutoResetSeconds = state.alarm.sourceAutoResetSeconds,
     },
     lockdown = state.lockdown,
   }
@@ -2834,8 +2959,8 @@ function alarmPlaybackChunkSize(profile)
     chunkSamples = 48000
   end
   chunkSamples = math.floor(chunkSamples)
-  if chunkSamples < 48000 then
-    chunkSamples = 48000
+  if chunkSamples < 12000 then
+    chunkSamples = 12000
   elseif chunkSamples > 128000 then
     chunkSamples = 128000
   end
@@ -3030,11 +3155,11 @@ function preparedAudioConfig()
       and announcements.remoteAudio ~= false
       and announcements.networkAudio ~= false,
     clientSynthesis = announcements.clientAudioSynthesis == true or announcements.localAudioSynthesis == true,
-    chunkSamples = tonumber(audio.networkChunkSamples or announcements.networkChunkSamples or announcements.remoteAudioChunkSamples) or 4096,
-    leadSeconds = tonumber(audio.networkLeadSeconds or announcements.networkLeadSeconds or announcements.remoteAudioLeadSeconds) or 1,
+    chunkSamples = tonumber(audio.networkChunkSamples or announcements.networkChunkSamples or announcements.remoteAudioChunkSamples) or 12000,
+    leadSeconds = tonumber(audio.networkLeadSeconds or announcements.networkLeadSeconds or announcements.remoteAudioLeadSeconds) or 2.5,
     streamTtlSeconds = tonumber(audio.networkStreamTtlSeconds or announcements.networkStreamTtlSeconds) or 45,
-    yieldChunks = tonumber(audio.networkYieldChunks or announcements.networkYieldChunks or announcements.remoteAudioYieldChunks) or 4,
-    yieldSeconds = tonumber(audio.networkYieldSeconds or announcements.networkYieldSeconds or announcements.remoteAudioYieldSeconds) or 0.03,
+    yieldChunks = tonumber(audio.networkYieldChunks or announcements.networkYieldChunks or announcements.remoteAudioYieldChunks) or 1,
+    yieldSeconds = tonumber(audio.networkYieldSeconds or announcements.networkYieldSeconds or announcements.remoteAudioYieldSeconds) or 0.05,
   }
 end
 
@@ -3058,16 +3183,16 @@ function kioskServerPreparedAudioOnly()
 end
 
 function preparedAudioChunkSamples()
-  local chunkSamples = math.floor(tonumber(preparedAudioConfig().chunkSamples) or 4096)
-  if chunkSamples < 512 then
-    return 512
+  local chunkSamples = math.floor(tonumber(preparedAudioConfig().chunkSamples) or 12000)
+  if chunkSamples < 1024 then
+    return 1024
   end
   local rednetConfig = config and config.rednet or {}
   if secureRednet.enabled(rednetConfig) and not secureRednet.audioPlaintext(rednetConfig) and chunkSamples > 2048 then
     chunkSamples = 2048
   end
-  if chunkSamples > 4096 then
-    return 4096
+  if chunkSamples > 16000 then
+    return 16000
   end
   return chunkSamples
 end
@@ -3357,6 +3482,7 @@ function startPreparedAlarmAudioPlayback(stream)
 
   local startAtMillis = stream.queueAfterCurrent and nil or serverMillisToLocalMillis(stream.startAtMillis)
   local volume = tonumber(stream.volume) or 1
+  local alarmChanged = false
 
   if not state.alarm.active then
     state.alarm.active = true
@@ -3364,8 +3490,14 @@ function startPreparedAlarmAudioPlayback(stream)
     state.alarm.sinceMillis = nowMillis()
     state.alarm.soundStartAt = startAtMillis or nowMillis()
     state.alarm.soundIndex = 1
+    alarmChanged = true
   elseif stream.profile and state.alarm.profile ~= stream.profile then
     state.alarm.profile = stream.profile
+    alarmChanged = true
+  end
+
+  if alarmChanged then
+    saveAlarmState()
   end
 
   if not stream.playbackStarted then
@@ -3473,12 +3605,28 @@ function handlePreparedAudioMessage(message, sender)
     stream.allowDuringAlarm = message.allowDuringAlarm and true or false
     stream.clearExisting = message.clearExisting ~= false
     stream.queueAfterCurrent = message.queueAfterCurrent and true or false
-    stream.finished = false
+    if stream.finished ~= true then
+      stream.finished = false
+    end
     queueRemoteAudioWork()
     return true
   elseif action == "chunk" then
     local index = math.floor(tonumber(message.index or message.chunkIndex) or 0)
     if index > 0 and (type(message.samples) == "string" or type(message.samples) == "table") then
+      stream.kind = message.kind or stream.kind or "announcement"
+      stream.profile = message.profile or stream.profile
+      stream.volume = message.volume or stream.volume
+      stream.sampleRate = message.sampleRate or stream.sampleRate
+      stream.totalSamples = tonumber(message.totalSamples) or stream.totalSamples
+      if message.allowDuringAlarm ~= nil then
+        stream.allowDuringAlarm = message.allowDuringAlarm and true or false
+      end
+      if message.clearExisting ~= nil then
+        stream.clearExisting = message.clearExisting ~= false
+      end
+      if message.queueAfterCurrent ~= nil then
+        stream.queueAfterCurrent = message.queueAfterCurrent and true or false
+      end
       if stream.chunks[index] == nil then
         stream.receivedChunks = (tonumber(stream.receivedChunks) or 0) + 1
       end
@@ -3607,11 +3755,18 @@ function broadcastPreparedAudio(kind, pcm, options)
       op = "audio_stream",
       action = "chunk",
       streamId = streamId,
+      kind = kind or "announcement",
+      profile = options.profile,
       index = chunkIndex,
+      totalSamples = #pcm,
       totalChunks = totalChunks,
       samples = packPcmSamples(pcm, firstIndex, lastIndex),
       sampleEncoding = "s8",
+      sampleRate = sampleRate,
+      volume = tonumber(options.volume) or 1,
       startAtMillis = startAtMillis,
+      allowDuringAlarm = options.allowDuringAlarm and true or false,
+      clearExisting = options.clearExisting ~= false,
       queueAfterCurrent = queueAfterCurrent,
     })
     if chunkIndex % yieldChunks == 0 then
@@ -3625,7 +3780,12 @@ function broadcastPreparedAudio(kind, pcm, options)
   local finishMessage = shallowCopy(base)
   finishMessage.action = "finish"
   finishMessage.startAtMillis = startAtMillis
-  sendPreparedAudioMessage(finishMessage)
+  for index = 1, 3 do
+    sendPreparedAudioMessage(finishMessage)
+    if index < 3 then
+      sleep(math.max(0.01, yieldSeconds))
+    end
+  end
   return sentAll, startAtMillis
 end
 
@@ -3851,10 +4011,6 @@ function startAlarmAudioStream(profile, speakerName, speaker, pcm, volume, optio
   queueAudioStreamWork()
 
   local queued = alarmFeedSpeakerStream(speakerName)
-  if not stream.startAtMillis and not stream.queueComplete and (tonumber(stream.acceptedSamples) or 0) <= 0 then
-    state.alarm.audioStreams[speakerName] = nil
-    return false
-  end
   return queued or state.alarm.audioStreams[speakerName] ~= nil
 end
 
@@ -3996,8 +4152,8 @@ function announcementPlaybackChunkSize()
     chunkSamples = 48000
   end
   chunkSamples = math.floor(chunkSamples)
-  if chunkSamples < 48000 then
-    return 48000
+  if chunkSamples < 12000 then
+    return 12000
   end
   if chunkSamples > 128000 then
     return 128000
@@ -4268,6 +4424,7 @@ function startAnnouncementAudioStream(speakerName, speaker, pcm, volume, options
     aukitPrepared = options.aukitPrepared == true,
   }
 
+  queueAudioStreamWork()
   local queued = announcementFeedSpeakerStream(speakerName)
   return queued or state.announcements.audioStreams[speakerName] ~= nil
 end
@@ -4633,6 +4790,7 @@ function raiseAlarm(reason, doorId, actor, profileName, options)
       state.alarm.soundStartAt = state.alarm.sinceMillis + alarmSyncLeadMillis(alarmProfile("emergency"))
       state.alarm.soundIndex = 1
       applyAlarmSourceOptions(options)
+      saveAlarmState()
       local profile = alarmProfile("emergency")
       pcall(prepareAlarmSoundCache, "emergency")
       broadcastAlarmState()
@@ -4659,6 +4817,7 @@ function raiseAlarm(reason, doorId, actor, profileName, options)
       applyAlarmSourceOptions(options)
     end
 
+    saveAlarmState()
     audit("ALARM_UPDATE", {
       reason = reason,
       door = doorId,
@@ -4684,6 +4843,7 @@ function raiseAlarm(reason, doorId, actor, profileName, options)
   state.alarm.soundStartAt = state.alarm.sinceMillis + alarmSyncLeadMillis(alarmProfile(profileName))
   state.alarm.soundIndex = 1
   applyAlarmSourceOptions(options)
+  saveAlarmState()
   clearAlarmAudioStreams(true)
   clearAlarmPreparedAudioCache()
   clearAnnouncementAudioStreams(true)
@@ -4720,6 +4880,7 @@ function resetAlarm(actor)
     soundStartAt = state.alarm.soundStartAt,
     sourceKey = state.alarm.sourceKey,
     sourceAutoReset = state.alarm.sourceAutoReset,
+    sourceAutoResetSeconds = state.alarm.sourceAutoResetSeconds,
   }
   setAlarmOutputs(false)
   state.alarm.active = false
@@ -4733,6 +4894,7 @@ function resetAlarm(actor)
   clearAlarmAutoResetSource()
   clearAlarmAudioStreams(true)
   clearAlarmPreparedAudioCache()
+  saveAlarmState()
   audit("ALARM_RESET", resetActor)
   broadcastAlarmState()
   broadcastEventNotification("alarm_reset", "Alarm Reset", "Alarm cleared by " .. resetActor, "info", {
@@ -6522,6 +6684,10 @@ function handleControllerMessage(sender, message)
     handlePreparedAudioMessage(message, sender)
     return
   end
+  if message.op == "alarm_state" then
+    kioskApplyAlarmMessage(message, sender)
+    return
+  end
 
   local reply = {
     ok = false,
@@ -7166,6 +7332,7 @@ function statusSnapshot()
       soundStartAt = state.alarm.soundStartAt,
       sourceKey = state.alarm.sourceKey,
       sourceAutoReset = state.alarm.sourceAutoReset,
+      sourceAutoResetSeconds = state.alarm.sourceAutoResetSeconds,
     },
     lockdown = state.lockdown,
     doors = doors,
@@ -9896,6 +10063,10 @@ function kioskApplyAlarmMessage(message, sender)
     state.alarm.door = alarm.door
     state.alarm.profile = alarm.profile
     state.alarm.sinceMillis = newSinceMillis or alarm.sinceMillis
+    state.alarm.sourceKey = alarm.sourceKey
+    state.alarm.sourceAutoReset = alarm.sourceAutoReset == true
+    state.alarm.sourceAutoResetSeconds = tonumber(alarm.sourceAutoResetSeconds)
+    state.alarm.sourceAutoResetAfter = nil
     if state.alarm.active then
       state.alarm.soundStartAt = newStartAt or nowMillis()
     else
@@ -9912,6 +10083,7 @@ function kioskApplyAlarmMessage(message, sender)
       state.kiosk.lastAlarmSound = 0
       state.alarm.soundIndex = 1
     end
+    saveAlarmState()
   end
 
   if message.lockdown ~= nil then
@@ -10172,9 +10344,13 @@ function alarmAudioStreamLoop()
     local event = { os.pullEventRaw() }
     if event[1] == "speaker_audio_empty" then
       processRemoteAudioStreams()
-      if not handleAlarmSpeakerAudioEmpty(event[2]) then
-        handleAnnouncementSpeakerAudioEmpty(event[2])
+      if type(event[2]) == "string" then
+        if not handleAlarmSpeakerAudioEmpty(event[2]) then
+          handleAnnouncementSpeakerAudioEmpty(event[2])
+        end
       end
+      feedAlarmAudioStreams()
+      feedAnnouncementAudioStreams()
       processAnnouncementQueue()
       resetAudioWatchdog()
     elseif event[1] == "security_audio_work" then
@@ -11350,7 +11526,9 @@ function kioskMain()
   state.kiosk.netLoop = true
   state.kiosk.loggedOutSince = os.clock()
   touchKioskActivity()
+  loadAlarmState()
   openRednet()
+  restoreAlarmRuntime(false, false)
   drawMonitors(true)
 
   local ok, err = pcall(function()
@@ -11370,7 +11548,9 @@ function controllerMain()
   config = loadConfig("controller")
   config.mode = "controller"
   math.randomseed(nowMillis() % 2147483647)
+  loadAlarmState()
   openRednet()
+  restoreAlarmRuntime(false, false)
   clearScreen()
   print("Security door controller")
   print("Computer id: " .. tostring(localComputerId() or "?"))
@@ -11602,7 +11782,9 @@ function main()
     loadEmployeeData()
   end
 
+  loadAlarmState()
   openRednet()
+  restoreAlarmRuntime(true, true)
   initializeDoors()
   drawMonitors(true)
   audit("START", {

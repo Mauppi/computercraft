@@ -629,8 +629,8 @@ local function playbackChunkSamples(config)
     samples = 48000
   end
   samples = math.floor(samples)
-  if samples < 48000 then
-    return 48000
+  if samples < 12000 then
+    return 12000
   end
   if samples > 128000 then
     return 128000

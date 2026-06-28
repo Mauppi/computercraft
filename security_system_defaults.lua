@@ -4,6 +4,7 @@
 local LOG_FILE = "security_audit.log"
 local ACCOUNTS_FILE = "security_accounts.lua"
 local SOCIAL_FILE = "security_social.lua"
+local ALARM_STATE_FILE = "security_alarm_state.lua"
 local PROTOCOL = "cc_security_v1"
 return {
   mode = "server",
@@ -204,10 +205,10 @@ return {
     serverPlayback = true,
     serverPreparedAudio = true,
     clientAudioSynthesis = false,
-    remoteAudioChunkSamples = 4096,
-    remoteAudioYieldChunks = 4,
-    remoteAudioYieldSeconds = 0.03,
-    remoteAudioLeadSeconds = 1,
+    remoteAudioChunkSamples = 12000,
+    remoteAudioYieldChunks = 1,
+    remoteAudioYieldSeconds = 0.05,
+    remoteAudioLeadSeconds = 2.5,
     alarmAnnouncements = true,
     queueLimit = 12,
     syncAssets = true,
@@ -605,6 +606,7 @@ return {
   },
 
   alarm = {
+    stateFile = ALARM_STATE_FILE,
     repeatSeconds = 1.5,
     syncLeadSeconds = 1.5,
     syncToleranceSeconds = 0.08,
